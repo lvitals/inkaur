@@ -1,11 +1,13 @@
 CC ?= gcc
-CFLAGS = -std=c99 -g -Wall -Wextra -pedantic --coverage
-LDFLAGS = --coverage
-OBJ = alloc.o json.o requests.o output.o install.o search.o util.o rpc.o pacman.o
+BASE_CFLAGS = -std=c99 -g -Wall -Wextra -pedantic
+CFLAGS = $(BASE_CFLAGS)
 LIBS = -lcurl -lalpm
 
-# Test objects
+OBJ = alloc.o json.o requests.o output.o install.o search.o util.o rpc.o pacman.o
 TEST_OBJ = tests/main.o tests/unit/test_json.o tests/unit/test_util.o tests/unit/test_alloc.o tests/unit/test_rpc.o tests/functional/test_cli.o
+
+# Flags for coverage (only used in test target)
+COVERAGE_FLAGS = --coverage
 
 all: inkaur
 
@@ -25,7 +27,10 @@ clean:
 uninstall:
 	rm /usr/local/bin/inkaur
 
-test: inkaur tests/run_tests
+# Special rule to build with coverage for testing
+test: CFLAGS += $(COVERAGE_FLAGS)
+test: LDFLAGS += $(COVERAGE_FLAGS)
+test: clean inkaur tests/run_tests
 	@./tests/run_tests
 	@printf "\n--- Coverage Statistics ---\n"
 	@gcov $(OBJ) inkaur.o | awk ' \
