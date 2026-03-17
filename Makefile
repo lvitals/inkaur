@@ -9,6 +9,9 @@ TEST_OBJ = tests/main.o tests/unit/test_json.o tests/unit/test_util.o tests/unit
 # Flags for coverage (only used in test target)
 COVERAGE_FLAGS = --coverage
 
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+
 all: inkaur
 
 inkaur: $(OBJ) inkaur.o
@@ -18,7 +21,7 @@ inkaur: $(OBJ) inkaur.o
 	$(CC) $(CFLAGS) -c $< -o $@
 
 install: all
-	cp inkaur /usr/local/bin/inkaur
+	install -Dm755 inkaur $(DESTDIR)$(BINDIR)/inkaur
 
 clean:
 	rm -f *.o inkaur tests/main.o tests/unit/*.o tests/functional/*.o tests/run_tests

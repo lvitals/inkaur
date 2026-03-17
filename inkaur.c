@@ -14,7 +14,7 @@
 #include <limits.h>
 
 static char *user_cache_path;
-#define VERSION "3.0"
+#define VERSION "0.1.0"
 
 void init(void)
 {
