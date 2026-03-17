@@ -18,6 +18,9 @@ void pacman_cleanup_handle(alpm_handle_t *handle);
 /* Checks if a package is installed locally. */
 bool pacman_is_package_installed(alpm_handle_t *handle, const char *pkgname);
 
+/* Checks if a package is available in any sync database. */
+bool pacman_package_in_sync_db(alpm_handle_t *handle, const char *pkgname);
+
 /* Lists all packages not found in sync databases (foreign packages). 
    Equivalent to 'pacman -Qm'. */
 ForeignPkg *pacman_get_foreign_packages(alpm_handle_t *handle, size_t *count);

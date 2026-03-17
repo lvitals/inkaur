@@ -39,6 +39,17 @@ bool pacman_is_package_installed(alpm_handle_t *handle, const char *pkgname) {
     return pkg != NULL;
 }
 
+bool pacman_package_in_sync_db(alpm_handle_t *handle, const char *pkgname) {
+    alpm_list_t *sync_dbs = alpm_get_syncdbs(handle);
+    for (alpm_list_t *j = sync_dbs; j; j = alpm_list_next(j)) {
+        alpm_db_t *db_sync = j->data;
+        if (alpm_db_get_pkg(db_sync, pkgname)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 ForeignPkg *pacman_get_foreign_packages(alpm_handle_t *handle, size_t *count) {
     alpm_db_t *db_local = alpm_get_localdb(handle);
     alpm_list_t *sync_dbs = alpm_get_syncdbs(handle);

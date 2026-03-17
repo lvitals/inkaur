@@ -135,10 +135,51 @@ int main(int argc, char **argv)
                         fprintf(stderr, "error: no targets specified\n");
                         return 1;
                 }
+                alpm_handle_t *handle = pacman_init_handle();
+                if (!handle) return 1;
+
+                int sync_pkgs_i = 0;
+                char **sync_pkgs = safe_malloc(sizeof(char *) * parameters_i);
+                int aur_pkgs_i = 0;
+                char **aur_pkgs = safe_malloc(sizeof(char *) * parameters_i);
+
                 for (int i = 0; i < parameters_i; i++) {
-                        if (install_package(parameters[i], user_cache_path))
-                                return 1;
+                        if (pacman_package_in_sync_db(handle, parameters[i])) {
+                                sync_pkgs[sync_pkgs_i++] = parameters[i];
+                        } else {
+                                aur_pkgs[aur_pkgs_i++] = parameters[i];
+                        }
                 }
+                pacman_cleanup_handle(handle);
+
+                if (sync_pkgs_i > 0) {
+                        char **cmd = safe_malloc(sizeof(char *) * (sync_pkgs_i + 4));
+                        char *elevator = get_privilege_elevator();
+                        int idx = 0;
+                        if (elevator) cmd[idx++] = elevator;
+                        cmd[idx++] = "pacman";
+                        cmd[idx++] = "-S";
+                        for (int i = 0; i < sync_pkgs_i; i++) cmd[idx++] = sync_pkgs[i];
+                        cmd[idx] = NULL;
+                        int r = run_command(cmd);
+                        free(cmd);
+                        if (r != 0) {
+                                free(sync_pkgs);
+                                free(aur_pkgs);
+                                return r;
+                        }
+                }
+
+                for (int i = 0; i < aur_pkgs_i; i++) {
+                        if (install_package(aur_pkgs[i], user_cache_path)) {
+                                free(sync_pkgs);
+                                free(aur_pkgs);
+                                return 1;
+                        }
+                }
+
+                free(sync_pkgs);
+                free(aur_pkgs);
                 return 0;
         }
 
