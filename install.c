@@ -198,6 +198,20 @@ HashMap *get_installed_packages(void)
 
 int update_packages(char *cache_path)
 {
+        char *elevator = get_privilege_elevator();
+        char *pacman_argv[6];
+        int idx = 0;
+        if (elevator) pacman_argv[idx++] = elevator;
+        pacman_argv[idx++] = "pacman";
+        pacman_argv[idx++] = "-Syu";
+        pacman_argv[idx++] = NULL;
+
+        printf(":: Synchronizing package databases...\n");
+        int r = run_command(pacman_argv);
+        if (r != 0) {
+                return r;
+        }
+
         int repeat = 0;  /* multiple updates needed */
 
         HashMap *installed_packages = get_installed_packages();
