@@ -1,0 +1,9 @@
+*.o
+*.gcno
+*.gcda
+*.gcov
+/inkaur
+/tests/run_tests
+tests/unit/test_json
+tests/unit/test_util
+tests/functional/test_cli
