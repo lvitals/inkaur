@@ -11,7 +11,9 @@ void test_parse_package_json() {
         "\"URL\": \"https://github.com/lvsantos/inkaur\","
         "\"NumVotes\": 10,"
         "\"Popularity\": 0.5,"
-        "\"OutOfDate\": null"
+        "\"OutOfDate\": null,"
+        "\"Depends\": [\"libcurl\", \"libalpm\"],"
+        "\"MakeDepends\": [\"make\"]"
     "}";
     
     struct json *j = json_parse(json_str);
@@ -21,6 +23,13 @@ void test_parse_package_json() {
     ASSERT_STR_EQ(pkg->name, "inkaur", "pkg name mismatch");
     ASSERT_STR_EQ(pkg->version, "3.0-1", "pkg version mismatch");
     ASSERT(!pkg->outofdate, "pkg outofdate mismatch");
+
+    ASSERT(pkg->depends_count == 2, "depends count mismatch");
+    ASSERT_STR_EQ(pkg->depends[0], "libcurl", "depends[0] mismatch");
+    ASSERT_STR_EQ(pkg->depends[1], "libalpm", "depends[1] mismatch");
+
+    ASSERT(pkg->makedepends_count == 1, "makedepends count mismatch");
+    ASSERT_STR_EQ(pkg->makedepends[0], "make", "makedepends[0] mismatch");
     
     free_package_data(pkg);
     free_json_item(j);

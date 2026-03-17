@@ -35,19 +35,26 @@ bool pacman_is_package_installed(alpm_handle_t *handle, const char *pkgname) {
     alpm_db_t *db_local = alpm_get_localdb(handle);
     if (!db_local) return false;
 
-    alpm_pkg_t *pkg = alpm_db_get_pkg(db_local, pkgname);
+    /* Check direct name first */
+    if (alpm_db_get_pkg(db_local, pkgname)) {
+        return true;
+    }
+
+    /* Check virtual provides in local DB */
+    alpm_list_t *dbs = alpm_list_add(NULL, db_local);
+    alpm_pkg_t *pkg = alpm_find_dbs_satisfier(handle, dbs, pkgname);
+    alpm_list_free(dbs);
+
     return pkg != NULL;
 }
 
 bool pacman_package_in_sync_db(alpm_handle_t *handle, const char *pkgname) {
     alpm_list_t *sync_dbs = alpm_get_syncdbs(handle);
-    for (alpm_list_t *j = sync_dbs; j; j = alpm_list_next(j)) {
-        alpm_db_t *db_sync = j->data;
-        if (alpm_db_get_pkg(db_sync, pkgname)) {
-            return true;
-        }
-    }
-    return false;
+    
+    /* Find a package that satisfies the dependency (name or provision) in sync DBs */
+    alpm_pkg_t *pkg = alpm_find_dbs_satisfier(handle, sync_dbs, pkgname);
+
+    return pkg != NULL;
 }
 
 ForeignPkg *pacman_get_foreign_packages(alpm_handle_t *handle, size_t *count) {

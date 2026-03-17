@@ -22,6 +22,10 @@ struct package {
         char *desc;
         char *version;
         long outofdate;
+        char **depends;
+        size_t depends_count;
+        char **makedepends;
+        size_t makedepends_count;
 };
 
 struct rpc_data *make_rpc_request(char *url);

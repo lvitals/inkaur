@@ -12,6 +12,117 @@
 #include <assert.h>
 #include <limits.h>
 #include <ctype.h>
+#include <alpm.h>
+
+#ifdef TESTING
+#define STATIC
+#else
+#define STATIC static
+#endif
+
+typedef struct {
+        char **items;
+        size_t count;
+        size_t capacity;
+} PkgList;
+
+STATIC PkgList *pkglist_new(void) {
+        PkgList *l = safe_malloc(sizeof(PkgList));
+        l->count = 0;
+        l->capacity = 16;
+        l->items = safe_malloc(sizeof(char *) * l->capacity);
+        return l;
+}
+
+STATIC void pkglist_free(PkgList *l) {
+        if (!l) return;
+        for (size_t i = 0; i < l->count; i++) {
+                free(l->items[i]);
+        }
+        free(l->items);
+        free(l);
+}
+
+STATIC void pkglist_add(PkgList *l, const char *name) {
+        for (size_t i = 0; i < l->count; i++) {
+                if (strcmp(l->items[i], name) == 0) return;
+        }
+        if (l->count >= l->capacity) {
+                l->capacity *= 2;
+                l->items = realloc(l->items, sizeof(char *) * l->capacity);
+        }
+        l->items[l->count++] = safe_strdup(name);
+}
+
+STATIC char *strip_version(const char *dep) {
+        char *s = safe_strdup(dep);
+        char *p = s;
+        while (*p) {
+                if (*p == '>' || *p == '<' || *p == '=') {
+                        *p = '\0';
+                        break;
+                }
+                p++;
+        }
+        return s;
+}
+
+STATIC int resolve_deps_recursive(const char *pkgname, PkgList *aur_queue, PkgList *pacman_queue, HashMap *visited, alpm_handle_t *handle) {
+        char *clean_name = strip_version(pkgname);
+        
+        if (hashmap_index(visited, clean_name)) {
+                free(clean_name);
+                return 0;
+        }
+
+        HMItem *item = new_item(clean_name, (void*)1, free, NULL);
+        hashmap_set(visited, item);
+
+        if (pacman_is_package_installed(handle, clean_name)) {
+                return 0;
+        }
+
+        if (pacman_package_in_sync_db(handle, clean_name)) {
+                pkglist_add(pacman_queue, clean_name);
+                return 0;
+        }
+
+        /* Check AUR */
+        char url[AUR_PATH_MAX];
+        snprintf(url, AUR_PATH_MAX, "https://aur.archlinux.org/rpc/?v=5&type=info&arg=%s", clean_name);
+        struct rpc_data *rpc = make_rpc_request(url);
+        
+        if (!rpc || rpc->resultcount == 0) {
+                fprintf(stderr, "error: package %s not found in repos or AUR\n", clean_name);
+                free_rpc_data(rpc);
+                return 1;
+        }
+
+        struct json *pkg_j = json_get_array_item(rpc->results, 0);
+        struct package *pkg = parse_package_json(pkg_j);
+
+        /* Recursively resolve dependencies */
+        for (size_t i = 0; i < pkg->depends_count; i++) {
+                if (resolve_deps_recursive(pkg->depends[i], aur_queue, pacman_queue, visited, handle)) {
+                        free_package_data(pkg);
+                        free_rpc_data(rpc);
+                        return 1;
+                }
+        }
+        for (size_t i = 0; i < pkg->makedepends_count; i++) {
+                if (resolve_deps_recursive(pkg->makedepends[i], aur_queue, pacman_queue, visited, handle)) {
+                        free_package_data(pkg);
+                        free_rpc_data(rpc);
+                        return 1;
+                }
+        }
+
+        pkglist_add(aur_queue, clean_name);
+
+        free_package_data(pkg);
+        free_rpc_data(rpc);
+        return 0;
+}
 
 int import_pgp_keys(char *path)
 {
@@ -67,10 +178,8 @@ int import_pgp_keys(char *path)
         return 0;
 }
 
-int install_package(char *name, char *cache_path)
-{
+static int install_aur_single(char *name, char *cache_path) {
         int rc = 0;
-
         struct rpc_data *api_json_result = NULL;
         struct json *pkg_json = NULL;
         struct package *pkg_info = NULL;
@@ -109,11 +218,12 @@ int install_package(char *name, char *cache_path)
 
         int should_clone = 1;
         if (!dir_is_empty(dest_path)) {
-                char *prompt = "Existing package data found. Rebuild?";
+                char prompt[1024];
+                snprintf(prompt, 1024, "Existing package data found for %s. Rebuild?", name);
                 should_clone = yesno_prompt(prompt, false);
 
                 if (should_clone) {
-                        char *rm_argv[] = {"rm", "-rfv", dest_path, NULL};
+                        char *rm_argv[] = {"rm", "-rf", dest_path, NULL};
                         run_command(rm_argv);
                 }
         }
@@ -155,6 +265,77 @@ end:
         free(dest_path);
         free_rpc_data(api_json_result);
         free_package_data(pkg_info);
+
+        return rc;
+}
+
+int install_package(char *name, char *cache_path)
+{
+        int rc = 0;
+        PkgList *aur_queue = pkglist_new();
+        PkgList *pacman_queue = pkglist_new();
+        HashMap *visited = new_hashmap(16);
+        alpm_handle_t *handle = pacman_init_handle();
+
+        if (!handle) {
+                rc = 1;
+                goto end;
+        }
+
+        printf(":: Resolving dependencies...\n");
+        if (resolve_deps_recursive(name, aur_queue, pacman_queue, visited, handle) != 0) {
+                rc = 1;
+                goto end;
+        }
+
+        if (pacman_queue->count > 0) {
+                printf(":: The following packages will be installed from repositories:\n");
+                for (size_t i = 0; i < pacman_queue->count; i++) {
+                        printf("   %s\n", pacman_queue->items[i]);
+                }
+                
+                char *elevator = get_privilege_elevator();
+                char **argv = safe_malloc(sizeof(char *) * (pacman_queue->count + 4));
+                int idx = 0;
+                if (elevator) argv[idx++] = elevator;
+                argv[idx++] = "pacman";
+                argv[idx++] = "-S";
+                argv[idx++] = "--needed";
+                for (size_t i = 0; i < pacman_queue->count; i++) {
+                        argv[idx++] = pacman_queue->items[i];
+                }
+                argv[idx++] = NULL;
+
+                if (run_command(argv) != 0) {
+                        fprintf(stderr, "error: failed to install dependencies from repositories\n");
+                        free(argv);
+                        rc = 1;
+                        goto end;
+                }
+                free(argv);
+        }
+
+        if (aur_queue->count > 0) {
+                printf(":: The following packages will be installed from AUR:\n");
+                for (size_t i = 0; i < aur_queue->count; i++) {
+                        printf("   %s\n", aur_queue->items[i]);
+                }
+
+                for (size_t i = 0; i < aur_queue->count; i++) {
+                        if (install_aur_single(aur_queue->items[i], cache_path) != 0) {
+                                rc = 1;
+                                break;
+                        }
+                }
+        } else {
+                printf(" %s is already installed.\n", name);
+        }
+
+end:
+        pkglist_free(aur_queue);
+        pkglist_free(pacman_queue);
+        free_hashmap(visited);
+        pacman_cleanup_handle(handle);
 
         return rc;
 }

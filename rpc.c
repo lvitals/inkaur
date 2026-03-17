@@ -65,16 +65,39 @@ struct package *parse_package_json(struct json *j)
                 return NULL;
 
         struct package *p = safe_malloc(sizeof(struct package));
+        memset(p, 0, sizeof(struct package));
 
-        char *name = json_get_dict_string(j, "Name");
-        char *desc = json_get_dict_string(j, "Description");
-        char *version = json_get_dict_string(j, "Version");
-        long outofdate = json_get_dict_number(j, "OutOfDate");
+        struct json *name_j = json_get_dict_item(j, "Name");
+        struct json *desc_j = json_get_dict_item(j, "Description");
+        struct json *version_j = json_get_dict_item(j, "Version");
+        struct json *outofdate_j = json_get_dict_item(j, "OutOfDate");
 
-        p->name = safe_strdup(name);
-        p->desc = safe_strdup(desc);
-        p->version = safe_strdup(version);
-        p->outofdate = outofdate;
+        if (name_j && name_j->type == json_string)
+                p->name = safe_strdup(name_j->data.string);
+        if (desc_j && desc_j->type == json_string)
+                p->desc = safe_strdup(desc_j->data.string);
+        if (version_j && version_j->type == json_string)
+                p->version = safe_strdup(version_j->data.string);
+        if (outofdate_j && outofdate_j->type == json_number)
+                p->outofdate = (long)outofdate_j->data.number;
+
+        struct json *depends_j = json_get_dict_item(j, "Depends");
+        if (depends_j && depends_j->type == json_array) {
+                p->depends_count = json_get_size(depends_j);
+                p->depends = safe_malloc(sizeof(char *) * p->depends_count);
+                for (size_t i = 0; i < p->depends_count; i++) {
+                        p->depends[i] = safe_strdup(json_get_array_string(depends_j, i));
+                }
+        }
+
+        struct json *makedepends_j = json_get_dict_item(j, "MakeDepends");
+        if (makedepends_j && makedepends_j->type == json_array) {
+                p->makedepends_count = json_get_size(makedepends_j);
+                p->makedepends = safe_malloc(sizeof(char *) * p->makedepends_count);
+                for (size_t i = 0; i < p->makedepends_count; i++) {
+                        p->makedepends[i] = safe_strdup(json_get_array_string(makedepends_j, i));
+                }
+        }
 
         return p;
 }
@@ -87,5 +110,14 @@ void free_package_data(struct package *p)
         free(p->name);
         free(p->desc);
         free(p->version);
+
+        for (size_t i = 0; i < p->depends_count; i++)
+                free(p->depends[i]);
+        free(p->depends);
+
+        for (size_t i = 0; i < p->makedepends_count; i++)
+                free(p->makedepends[i]);
+        free(p->makedepends);
+
         free(p);
 }

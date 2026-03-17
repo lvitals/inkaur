@@ -5,6 +5,7 @@ void run_json_tests(void);
 void run_util_tests(void);
 void run_alloc_tests(void);
 void run_rpc_tests(void);
+void run_install_tests(void);
 void run_cli_tests(void);
 
 int main(void) {
@@ -15,6 +16,7 @@ int main(void) {
     run_util_tests();
     run_alloc_tests();
     run_rpc_tests();
+    run_install_tests();
 
     printf("\n--- Functional Tests ---\n");
     run_cli_tests();

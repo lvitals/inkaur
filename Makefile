@@ -4,7 +4,7 @@ CFLAGS = $(BASE_CFLAGS)
 LIBS = -lcurl -lalpm
 
 OBJ = alloc.o json.o requests.o output.o install.o search.o util.o rpc.o pacman.o
-TEST_OBJ = tests/main.o tests/unit/test_json.o tests/unit/test_util.o tests/unit/test_alloc.o tests/unit/test_rpc.o tests/functional/test_cli.o
+TEST_OBJ = tests/main.o tests/unit/test_json.o tests/unit/test_util.o tests/unit/test_alloc.o tests/unit/test_rpc.o tests/unit/test_install.o tests/functional/test_cli.o
 
 # Flags for coverage (only used in test target)
 COVERAGE_FLAGS = --coverage
@@ -30,13 +30,13 @@ clean:
 uninstall:
 	rm /usr/local/bin/inkaur
 
-# Special rule to build with coverage for testing
-test: CFLAGS += $(COVERAGE_FLAGS)
+# Special rule to build with coverage and testing flags
+test: CFLAGS += $(COVERAGE_FLAGS) -DTESTING
 test: LDFLAGS += $(COVERAGE_FLAGS)
 test: clean inkaur tests/run_tests
 	@./tests/run_tests
 	@printf "\n--- Coverage Statistics ---\n"
-	@gcov $(OBJ) inkaur.o | awk ' \
+	@gcov $(OBJ) | awk ' \
 		/File/ {file=$$2; gsub(/'\''/, "", file)} \
 		/Lines executed:/ { \
 			if (file !~ /^\//) { \
@@ -48,12 +48,13 @@ test: clean inkaur tests/run_tests
 	@echo "---------------------------"
 
 coverage-report: test
-	gcov $(OBJ) inkaur.o
+	gcov $(OBJ)
 
 check-leaks:
 	@./check_leaks.sh
 
-tests/run_tests: $(TEST_OBJ) json.o util.o alloc.o rpc.o requests.o
+tests/run_tests: $(TEST_OBJ) $(OBJ)
 	$(CC) $(CFLAGS) $^ -o $@ $(LIBS)
+
 
 .PHONY: all install clean uninstall test coverage-report check-leaks

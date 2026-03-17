@@ -14,7 +14,7 @@ void test_version_output(void) {
     bool found_version = false;
     bool found_author = false;
     while (fgets(buf, sizeof(buf), fp)) {
-        if (strstr(buf, "inkaur 3.0")) {
+        if (strstr(buf, "inkaur 0.1.0")) {
             found_version = true;
         }
         if (strstr(buf, "Leandro V. Catarin")) {
