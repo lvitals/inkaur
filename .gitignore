@@ -2,6 +2,7 @@
 *.gcno
 *.gcda
 *.gcov
+*.log
 /inkaur
 /tests/run_tests
 tests/unit/test_json
