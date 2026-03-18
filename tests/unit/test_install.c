@@ -2,6 +2,7 @@
 #include "../../install.h"
 #include <stdlib.h>
 #include <string.h>
+#include <alpm.h>
 
 /* Forward declarations for static functions made visible by TESTING macro */
 typedef struct {
@@ -46,8 +47,24 @@ void test_pkglist() {
     pkglist_free(l);
 }
 
+void test_version_comparison_logic() {
+    /* Test the specific case reported by the user:
+     * inkaur-git : 0.1.0.r7.g06f7b75-1 (installed) -> 0.1.0.r6.g7b812cd-1 (AUR)
+     * The AUR version is OLDER than the installed version.
+     */
+    const char *v_installed = "0.1.0.r7.g06f7b75-1";
+    const char *v_aur = "0.1.0.r6.g7b812cd-1";
+    
+    /* Using alpm_pkg_vercmp(aur, installed) > 0 should return false for this downgrade */
+    ASSERT(alpm_pkg_vercmp(v_aur, v_installed) < 0, "AUR version r6 should be OLDER than r7");
+    
+    /* Standard update case: AUR is newer */
+    ASSERT(alpm_pkg_vercmp("1.1-1", "1.0-1") > 0, "1.1-1 should be NEWER than 1.0-1");
+}
+
 void run_install_tests() {
     test_strip_version();
     test_pkglist();
+    test_version_comparison_logic();
     printf("Unit tests for Install passed!\n");
 }

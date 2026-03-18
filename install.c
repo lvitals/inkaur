@@ -67,9 +67,9 @@ STATIC char *strip_version(const char *dep) {
         return s;
 }
 
-STATIC int resolve_deps_recursive(const char *pkgname, PkgList *aur_queue, PkgList *pacman_queue, HashMap *visited, alpm_handle_t *handle) {
+STATIC int resolve_deps_recursive(const char *pkgname, PkgList *aur_queue, PkgList *pacman_queue, HashMap *visited, alpm_handle_t *handle, bool top_level) {
         char *clean_name = strip_version(pkgname);
-        
+
         if (hashmap_index(visited, clean_name)) {
                 free(clean_name);
                 return 0;
@@ -78,7 +78,7 @@ STATIC int resolve_deps_recursive(const char *pkgname, PkgList *aur_queue, PkgLi
         HMItem *item = new_item(clean_name, (void*)1, free, NULL);
         hashmap_set(visited, item);
 
-        if (pacman_is_package_installed(handle, clean_name)) {
+        if (!top_level && pacman_is_package_installed(handle, clean_name)) {
                 return 0;
         }
 
@@ -91,7 +91,7 @@ STATIC int resolve_deps_recursive(const char *pkgname, PkgList *aur_queue, PkgLi
         char url[AUR_PATH_MAX];
         snprintf(url, AUR_PATH_MAX, "https://aur.archlinux.org/rpc/?v=5&type=info&arg=%s", clean_name);
         struct rpc_data *rpc = make_rpc_request(url);
-        
+
         if (!rpc || rpc->resultcount == 0) {
                 fprintf(stderr, "error: package %s not found in repos or AUR\n", clean_name);
                 free_rpc_data(rpc);
@@ -103,14 +103,15 @@ STATIC int resolve_deps_recursive(const char *pkgname, PkgList *aur_queue, PkgLi
 
         /* Recursively resolve dependencies */
         for (size_t i = 0; i < pkg->depends_count; i++) {
-                if (resolve_deps_recursive(pkg->depends[i], aur_queue, pacman_queue, visited, handle)) {
+                if (resolve_deps_recursive(pkg->depends[i], aur_queue, pacman_queue, visited, handle, false)) {
                         free_package_data(pkg);
                         free_rpc_data(rpc);
                         return 1;
                 }
         }
+
         for (size_t i = 0; i < pkg->makedepends_count; i++) {
-                if (resolve_deps_recursive(pkg->makedepends[i], aur_queue, pacman_queue, visited, handle)) {
+                if (resolve_deps_recursive(pkg->makedepends[i], aur_queue, pacman_queue, visited, handle, false)) {
                         free_package_data(pkg);
                         free_rpc_data(rpc);
                         return 1;
@@ -283,7 +284,7 @@ int install_package(char *name, char *cache_path)
         }
 
         printf(":: Resolving dependencies...\n");
-        if (resolve_deps_recursive(name, aur_queue, pacman_queue, visited, handle) != 0) {
+        if (resolve_deps_recursive(name, aur_queue, pacman_queue, visited, handle, true) != 0) {
                 rc = 1;
                 goto end;
         }
@@ -463,7 +464,7 @@ int update_packages(char *cache_path)
                                 name);
 
                 /* add to list of old packages */
-                if (strcmp(new_version, installed_version) != 0) {
+                if (installed_version && alpm_pkg_vercmp(new_version, installed_version) > 0) {
                         update_queue[update_queue_i++] = safe_strdup(name);
 
                         char name_fmt[1024];
