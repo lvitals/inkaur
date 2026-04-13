@@ -815,7 +815,7 @@ char *json_read_file(char *path)
                 return NULL;
         }
 
-        char c;
+        int c;
         while ((c = fgetc(fp)) != EOF) {
                 if (buffer_i + 2 > capacity) {
                         char *nbuffer = realloc(buffer,
