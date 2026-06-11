@@ -80,7 +80,7 @@ ForeignPkg *pacman_get_foreign_packages(alpm_handle_t *handle, size_t *count) {
         }
 
         if (!found) {
-            foreign_pkgs = realloc(foreign_pkgs, (*count + 1) * sizeof(ForeignPkg));
+            foreign_pkgs = safe_realloc(foreign_pkgs, (*count + 1) * sizeof(ForeignPkg));
             foreign_pkgs[*count].name = safe_strdup(pkgname);
             foreign_pkgs[*count].version = safe_strdup(pkgver);
             (*count)++;

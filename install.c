@@ -49,7 +49,7 @@ STATIC void pkglist_add(PkgList *l, const char *name) {
         }
         if (l->count >= l->capacity) {
                 l->capacity *= 2;
-                l->items = realloc(l->items, sizeof(char *) * l->capacity);
+                l->items = safe_realloc(l->items, sizeof(char *) * l->capacity);
         }
         l->items[l->count++] = safe_strdup(name);
 }
@@ -296,7 +296,7 @@ int install_package(char *name, char *cache_path)
                 }
                 
                 char *elevator = get_privilege_elevator();
-                char **argv = safe_malloc(sizeof(char *) * (pacman_queue->count + 4));
+                char **argv = safe_malloc(sizeof(char *) * (pacman_queue->count + 5));
                 int idx = 0;
                 if (elevator) argv[idx++] = elevator;
                 argv[idx++] = "pacman";

@@ -41,7 +41,7 @@ void indent_print(char *str, int indent)
 
                 if (current_word_idx + 2 > current_word_capacity) {
                         current_word_capacity += 32;
-                        current_word = realloc(current_word,
+                        current_word = safe_realloc(current_word,
                                         sizeof(char) * current_word_capacity);
                 }
 
