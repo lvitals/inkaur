@@ -13,6 +13,7 @@
 #include <limits.h>
 #include <ctype.h>
 #include <alpm.h>
+#include <dirent.h>
 
 #ifdef TESTING
 #define STATIC
@@ -525,8 +526,49 @@ end:
 
 int clean_cache(char *cache_path)
 {
-        char *rm_argv[] = {"rm", "-rfv", cache_path, NULL};
-        return run_command(rm_argv);
+        DIR *dir = opendir(cache_path);
+        if (!dir) return 1;
+
+        int rc = 0;
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_name[0] == '.') continue;
+
+                char pkg_path[AUR_PATH_MAX + 256];
+                int n = snprintf(pkg_path, sizeof(pkg_path), "%s/%s", cache_path, entry->d_name);
+                if (n < 0 || (size_t)n >= sizeof(pkg_path)) {
+                        fprintf(stderr, "warning: path too long, skipping: %s/%s\n", cache_path, entry->d_name);
+                        rc = 1;
+                        continue;
+                }
+
+                if (!dir_exists(pkg_path)) continue;
+
+                printf("cleaning %s...\n", entry->d_name);
+
+                char path[AUR_PATH_MAX + 512];
+                
+                /* Remove src directory */
+                n = snprintf(path, sizeof(path), "%s/src", pkg_path);
+                if (n >= 0 && (size_t)n < sizeof(path)) {
+                        char *rm_src[] = {"rm", "-rf", path, NULL};
+                        if (run_command(rm_src) != 0) rc = 1;
+                }
+
+                /* Remove pkg directory */
+                n = snprintf(path, sizeof(path), "%s/pkg", pkg_path);
+                if (n >= 0 && (size_t)n < sizeof(path)) {
+                        char *rm_pkg[] = {"rm", "-rf", path, NULL};
+                        if (run_command(rm_pkg) != 0) rc = 1;
+                }
+
+                /* Remove built packages */
+                char *rm_pkgs[] = {"sh", "-c", "rm -f *.pkg.tar.*", NULL};
+                if (run_command_at(rm_pkgs, pkg_path) != 0) rc = 1;
+        }
+
+        closedir(dir);
+        return rc;
 }
 
 int remove_packages(int n, char **pkgs)
