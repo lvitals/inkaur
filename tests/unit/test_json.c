@@ -1,4 +1,5 @@
 #include "../../json.h"
+#include "../../alloc.h"
 #include "../test_helper.h"
 #include <string.h>
 
@@ -98,12 +99,56 @@ void test_json_read_file() {
     free_json_item(j);
 }
 
+void test_json_parse_negative_number() {
+    char *json_str = "-123.45";
+    int idx;
+    struct json *j = json_parse_number(json_str, &idx);
+    
+    ASSERT(j != NULL, "json_parse_number failed for negative");
+    ASSERT(j->type == json_number, "type should be number");
+    ASSERT(j->data.number == -123.45, "negative number value mismatch");
+    
+    free_json_item(j);
+
+    struct json *j2 = json_parse("{\"val\": -42}");
+    ASSERT(j2 != NULL, "json_parse failed for negative in dict");
+    ASSERT(json_get_dict_number(j2, "val") == -42, "negative number value mismatch in dict");
+    free_json_item(j2);
+}
+
+void test_hashmap_resizing() {
+    HashMap *map = new_hashmap(4); // Start small
+    for (int i = 0; i < 20; i++) {
+        char key[16];
+        sprintf(key, "key%d", i);
+        int *val = safe_malloc(sizeof(int));
+        *val = i;
+        hashmap_set(map, new_item(safe_strdup(key), val, free, free));
+    }
+
+    ASSERT(map->stored == 20, "hashmap should have 20 items");
+    /* It should have doubled: 4 -> 8 -> 16 -> 32 */
+    ASSERT(map->can_store == 32, "hashmap should have resized to exactly 32");
+
+    for (int i = 0; i < 20; i++) {
+        char key[16];
+        sprintf(key, "key%d", i);
+        int *val = hashmap_index(map, key);
+        ASSERT(val != NULL, "item should be found after resize");
+        ASSERT(*val == i, "item value mismatch after resize");
+    }
+
+    free_hashmap(map);
+}
+
 void run_json_tests() {
     test_json_parse_string();
     test_json_parse_number();
+    test_json_parse_negative_number();
     test_json_parse_array();
     test_json_parse_dict();
     test_json_parse_bool_null();
+    test_hashmap_resizing();
     test_json_safe_access();
     test_json_nested();
     test_json_read_file();

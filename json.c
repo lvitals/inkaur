@@ -11,9 +11,7 @@
 HMItem *new_item(char *key, void *val,
                 void (*k_free_func)(void *), void (*v_free_func)(void *))
 {
-	HMItem *item = calloc(1, sizeof(*item));
-        if (item == NULL)
-                return NULL;
+	HMItem *item = safe_calloc(1, sizeof(*item));
 
 	item->key = key;
 	item->val = val;
@@ -38,17 +36,15 @@ void free_item(HMItem *item)
 
 HashMap *new_hashmap(size_t capacity)
 {
-	HashMap *map = calloc(1, sizeof(*map));
-        if (map == NULL)
-                return NULL;
+	HashMap *map = safe_calloc(1, sizeof(*map));
 
-	map->can_store = capacity;
+	size_t real_capacity = 1;
+	while (real_capacity < capacity) real_capacity *= 2;
+	if (real_capacity < 4) real_capacity = 4;
+
+	map->can_store = real_capacity;
 	map->stored = 0;
-	map->items = calloc(map->can_store, sizeof(HMItem *));
-        if (map->items == NULL) {
-                free(map);
-                return NULL;
-        }
+	map->items = safe_calloc(map->can_store, sizeof(HMItem *));
 
 	return map;
 }
@@ -65,44 +61,16 @@ void free_hashmap(HashMap *map)
 	free(map);
 }
 
-int check_hashmap_capacity(HashMap *map, size_t n)
+static void _hashmap_set_no_resize(HashMap *map, HMItem *item)
 {
-	if (!((map->stored + n + 1) > map->can_store))
-		return 0;
-
-        int ns_a = ((n + 8) > 32) ? (n + 8) : 32;
-	size_t new_size = map->can_store + ns_a;
-	HMItem **new = calloc(new_size, sizeof(HMItem *));
-        if (new == NULL)
-                return 1;
-
-	for (size_t i = 0; i < map->can_store; i++) {
-		HMItem *item = map->items[i];
-		if (item != NULL)
-			new[i] = item;
-	}
-
-	free(map->items);
-	map->can_store = new_size;
-	map->items = new;
-
-        return 0;
-}
-
-int hashmap_set(HashMap *map, HMItem *item)
-{
-	if (check_hashmap_capacity(map, 1))
-                return 1;
-
 	uint64_t hash = hashmap_hash_func(item->key);
 	size_t index = (size_t)(hash & (uint64_t)(map->can_store - 1));
 
-	/* find an empty entry */
 	while (map->items[index] != NULL) {
 		if (strcmp(item->key, map->items[index]->key) == 0) {
 			free_item(map->items[index]);
 			map->items[index] = item;
-			return 0;
+			return;
 		}
 
 		index++;
@@ -112,6 +80,38 @@ int hashmap_set(HashMap *map, HMItem *item)
 
 	map->items[index] = item;
 	map->stored++;
+}
+
+int check_hashmap_capacity(HashMap *map, size_t n)
+{
+	if (!((map->stored + n + 1) > map->can_store))
+		return 0;
+
+	size_t old_capacity = map->can_store;
+	HMItem **old_items = map->items;
+
+	size_t new_capacity = old_capacity * 2;
+	if (new_capacity < 16) new_capacity = 16;
+
+	map->items = safe_calloc(new_capacity, sizeof(HMItem *));
+	map->can_store = new_capacity;
+	map->stored = 0;
+
+	for (size_t i = 0; i < old_capacity; i++) {
+		if (old_items[i] != NULL) {
+			_hashmap_set_no_resize(map, old_items[i]);
+		}
+	}
+
+	free(old_items);
+
+	return 0;
+}
+
+int hashmap_set(HashMap *map, HMItem *item)
+{
+	check_hashmap_capacity(map, 1);
+	_hashmap_set_no_resize(map, item);
         
         return 0;
 }
@@ -173,10 +173,7 @@ void hashmap_remove(HashMap *map, char *key)
 
 struct json *new_json(void)
 {
-        struct json *j = calloc(1, sizeof(struct json));
-        if (j == NULL)
-                return NULL;
-
+        struct json *j = safe_calloc(1, sizeof(struct json));
         j->type = json_null;
 
         return j;
@@ -285,21 +282,13 @@ HMItem *json_parse_dict_tuple(char *str, int *idx)
 
         struct HMItem *tuple = new_item(key, val, free,
                         hashmap_item_free_func(free_json_item));
-        if (tuple == NULL) {
-                free(key);
-                free_json_item(val);
-                return NULL;
-        }
-
+        
         return tuple;
 }
 
 struct json *json_parse_dict(char *str, int *idx)
 {
         struct json *j = new_json();
-        if (j == NULL)
-                return NULL;
-
         j->type = json_dict;
 
         size_t len = strlen(str);
@@ -310,11 +299,6 @@ struct json *json_parse_dict(char *str, int *idx)
         }
 
         HashMap *dict = new_hashmap(16);
-        if (dict == NULL) {
-                free_json_item(j);
-                return NULL;
-        }
-
         j->data.json_data_dict = dict;
 
         bool done = false;
@@ -358,10 +342,7 @@ struct json *json_parse_dict(char *str, int *idx)
 append:
                 i = current_idx;
 
-                if (hashmap_set(dict, current_tuple)) {
-                        free_json_item(j);
-                        return NULL;
-                } 
+                hashmap_set(dict, current_tuple);
 
                 if (done)
                         break;
@@ -379,20 +360,12 @@ append:
 struct json *json_parse_string(char *str, int *idx)
 {
         struct json *j = new_json();
-        if (j == NULL)
-                return NULL;
-
         j->type = json_string;
 
         size_t len = strlen(str);
 
         if (strncmp(str, "\"\"", strlen("\"\"")) == 0) {
                 j->data.string = safe_strdup("");
-                if (j->data.string == NULL) {
-                        free_json_item(j);
-                        return NULL;
-                }
-
                 if (idx != NULL)
                         *idx = 2;
 
@@ -407,11 +380,7 @@ struct json *json_parse_string(char *str, int *idx)
 
         size_t size = 1024;
         size_t buffer_i = 0;
-        char *buffer = malloc(sizeof(char) * size);
-        if (buffer == NULL) {
-                free_json_item(j);
-                return NULL;
-        }
+        char *buffer = safe_malloc(sizeof(char) * size);
 
         bool escaped = false;
         size_t i;
@@ -426,14 +395,7 @@ struct json *json_parse_string(char *str, int *idx)
                         break;
 
                 if (buffer_i + 2 > size) {
-                        char *nbuffer = realloc(buffer, sizeof(char) *
-                                        (size += 512));
-                        if (nbuffer == NULL) {
-                                free(buffer);
-                                free_json_item(j);
-                                return NULL;
-                        }
-                        buffer = nbuffer;
+                        buffer = safe_realloc(buffer, sizeof(char) * (size += 512));
                 }
 
                 buffer[buffer_i++] = c;
@@ -457,9 +419,6 @@ struct json *json_parse_string(char *str, int *idx)
 struct json *json_parse_array(char *str, int *idx)
 {
         struct json *j = new_json();
-        if (j == NULL)
-                return NULL;
-
         j->type = json_array;
 
         size_t len = strlen(str);
@@ -479,13 +438,7 @@ struct json *json_parse_array(char *str, int *idx)
 
         size_t capacity = 4;
         size_t array_i = 0;
-        struct json **array = calloc(capacity,
-                        sizeof(struct json *));
-
-        if (array == NULL) {
-                free_json_item(j);
-                return NULL;
-        }
+        struct json **array = safe_calloc(capacity, sizeof(struct json *));
         
         j->data.json_data_array = array;
 
@@ -517,16 +470,8 @@ struct json *json_parse_array(char *str, int *idx)
                 }
 
                 if (array_i + 1 > capacity) {
-                        struct json **narray = realloc(array,
-                                    sizeof(struct json *) * (capacity += 4));
-                        if (narray == NULL) {
-                               free_json_item(elem);
-                               free_json_item(j);
-                               return NULL;
-                        }
-
-                        array = narray;
-                        j->data.json_data_array = narray;
+                        array = safe_realloc(array, sizeof(struct json *) * (capacity += 4));
+                        j->data.json_data_array = array;
                 }
 
                 array[array_i++] = elem;
@@ -551,8 +496,6 @@ struct json *json_parse_array(char *str, int *idx)
 struct json *json_parse_number(char *str, int *idx)
 {
         struct json *j = new_json();
-        if (j == NULL)
-                return NULL;
         j->type = json_number;
 
         size_t len = strlen(str);
@@ -566,26 +509,33 @@ struct json *json_parse_number(char *str, int *idx)
 
         size_t capacity = 16;
         size_t data_i = 0;
-        char *data = malloc(sizeof(char) * capacity);
-        if (data == NULL) {
-                free_json_item(j);
-                return NULL;
-        }
+        char *data = safe_malloc(sizeof(char) * capacity);
 
         for (i = start; i < len; i++) {
                 char c = str[i];
-                if (!isdigit(c) && c != '.' && c != 'e')
+                bool is_valid = false;
+
+                if (isdigit(c) || c == '.') {
+                        is_valid = true;
+                } else if (c == 'e' || c == 'E') {
+                        is_valid = true;
+                } else if (c == '-' || c == '+') {
+                        /* sign is only valid at the start or after e/E */
+                        if (i == start) {
+                                is_valid = true;
+                        } else {
+                                char prev = str[i-1];
+                                if (prev == 'e' || prev == 'E') {
+                                        is_valid = true;
+                                }
+                        }
+                }
+
+                if (!is_valid)
                         break;
 
                 if (data_i + 2 > capacity) {
-                        char *ndata = realloc(data,
-                                        sizeof(char) * (capacity += 4));
-                        if (ndata == NULL) {
-                                free_json_item(j);
-                                free(data);
-                                return NULL;
-                        }
-                        data = ndata;
+                        data = safe_realloc(data, sizeof(char) * (capacity += 4));
                 }
 
                 data[data_i++] = c;
@@ -678,7 +628,7 @@ struct json *json_parse_item(char *str, int *idx)
         default:
                 if (c == 'n')  /* null */
                         j = json_parse_null(str + start, &end_idx);
-                else if (isdigit(c))  /* number */
+                else if (isdigit(c) || c == '-')  /* number */
                         j = json_parse_number(str + start, &end_idx);
                 else if (c == 't' || c == 'f')  /* true / false */
                         j = json_parse_bool(str + start, &end_idx);
@@ -720,7 +670,7 @@ bool _is_whole_number(char *s)
 {
         size_t len = strlen(s);
         for (size_t i = 0; i < len; i++) {
-                if (!isdigit(s[i]))
+                if (!isdigit(s[i]) && !(i == 0 && s[i] == '-'))
                         return false;
         }
 
@@ -763,9 +713,6 @@ struct json *json_safe_access(struct json *j, char *fmt, ...)
 {
         /* if fmt is read-only strtok() will fail */
         char *fmt_cpy = safe_strdup(fmt);  
-        if (fmt_cpy == NULL)
-                return NULL;
-
         va_list ap;
         va_start(ap, fmt);
 
@@ -809,23 +756,12 @@ char *json_read_file(char *path)
 
         size_t capacity = 1024;
         size_t buffer_i = 0;
-        char *buffer = malloc(sizeof(char) * capacity);
-        if (buffer == NULL) {
-                fclose(fp);
-                return NULL;
-        }
+        char *buffer = safe_malloc(sizeof(char) * capacity);
 
         int c;
         while ((c = fgetc(fp)) != EOF) {
                 if (buffer_i + 2 > capacity) {
-                        char *nbuffer = realloc(buffer,
-                                        sizeof(char) * (capacity += 512));
-                        if (nbuffer == NULL) {
-                                free(buffer);
-                                fclose(fp);
-                                return NULL;
-                        }
-                        buffer = nbuffer;
+                        buffer = safe_realloc(buffer, sizeof(char) * (capacity += 512));
                 }
 
                 buffer[buffer_i++] = c;
