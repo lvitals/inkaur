@@ -1,46 +1,78 @@
 #include "alloc.h"
 
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-void checkmem(void *ptr)
+static void die_oom(void)
 {
-        if (ptr == NULL) {
-                fprintf(stderr, "error: failed to allocate memory.\n");
-                exit(1);
-        }
+    fputs("error: out of memory\n", stderr);
+    abort();
 }
 
-void *safe_malloc(size_t s)
+void *xmalloc(size_t n)
 {
-        void *mem = malloc(s);
-        checkmem(mem);
-        return mem;
+    void *p = malloc(n ? n : 1);
+    if (p == NULL)
+        die_oom();
+    return p;
 }
 
-void *safe_calloc(int n, size_t s)
+void *xcalloc(size_t n, size_t size)
 {
-        void *mem = calloc(n, s);
-        checkmem(mem);
-        return mem;
+    void *p = calloc(n ? n : 1, size ? size : 1);
+    if (p == NULL)
+        die_oom();
+    return p;
 }
 
-void *safe_realloc(void *ptr, size_t s)
+void *xrealloc(void *p, size_t n)
 {
-        void *mem = realloc(ptr, s);
-        checkmem(mem);
-        return mem;
+    void *q = realloc(p, n ? n : 1);
+    if (q == NULL)
+        die_oom();
+    return q;
 }
 
-char *safe_strdup(const char *str)
+void *xreallocarray(void *p, size_t n, size_t size)
 {
-        if (str == NULL)
-                return NULL;
+    if (size != 0 && n > SIZE_MAX / size)
+        die_oom();
+    return xrealloc(p, n * size);
+}
 
-        size_t len = strlen(str);
-        char *mem = safe_malloc(sizeof(char) * (len + 1));
-        strcpy(mem, str);
+char *xstrndup(const char *s, size_t n)
+{
+    size_t len = 0;
+    while (len < n && s[len] != '\0')
+        len++;
+    char *d = xmalloc(len + 1);
+    memcpy(d, s, len);
+    d[len] = '\0';
+    return d;
+}
 
-        return mem;
+char *xstrdup(const char *s)
+{
+    if (s == NULL)
+        return NULL;
+    return xstrndup(s, strlen(s));
+}
+
+char *xasprintf(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        die_oom();
+
+    char *buf = xmalloc((size_t)n + 1);
+    va_start(ap, fmt);
+    vsnprintf(buf, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return buf;
 }

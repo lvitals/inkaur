@@ -1,36 +1,33 @@
 #ifndef RPC_H
 #define RPC_H
 
+#include "buf.h"
 #include "json.h"
 
-typedef enum {
-        rpc_search,
-        rpc_multiinfo,
-        rpc_error,
-} rpc_result_t;
+#include <stdbool.h>
 
-struct rpc_data {
-        size_t resultcount;
-        rpc_result_t type;
-        char *error;
-        struct json *results;
-        struct json *raw_json;
-};
+/* One validated package record from the AUR RPC (v5). */
+typedef struct {
+    char *name;
+    char *base;
+    char *version;
+    char *desc;        /* may be NULL */
+    long outofdate;    /* 0 if not flagged */
+    bool orphan;       /* Maintainer == null */
+    const JVal *raw;   /* borrowed from the response, for -Si */
+} AurPkg;
 
-struct package {
-        char *name;
-        char *desc;
-        char *version;
-        long outofdate;
-        char **depends;
-        size_t depends_count;
-        char **makedepends;
-        size_t makedepends_count;
-};
+typedef struct {
+    JVal *root;
+    AurPkg *pkgs;
+    size_t n;
+} RpcResult;
 
-struct rpc_data *make_rpc_request(char *url);
-void free_rpc_data(struct rpc_data *data);
-struct package *parse_package_json(struct json *j);
-void free_package_data(struct package *p);
+/* info for up to RPC_BATCH names. Invalid records are dropped with a warning. */
+int rpc_info(const StrList *names, RpcResult *out);
+/* search by=name-desc (by=provides when by_provides). */
+int rpc_search(const char *term, bool by_provides, RpcResult *out);
+void rpc_result_free(RpcResult *r);
+const AurPkg *rpc_find(const RpcResult *r, const char *name);
 
-#endif  /* RPC_H */
+#endif /* RPC_H */

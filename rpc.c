@@ -1,123 +1,133 @@
 #include "rpc.h"
 #include "alloc.h"
-#include "requests.h"
-#include "json.h"
+#include "config.h"
+#include "net.h"
+#include "validate.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-struct rpc_data *make_rpc_request(char *url)
+static int rpc_call(const char *url, RpcResult *out)
 {
-        char *data = requests_get(url);
-        if (data == NULL)
-                return NULL;
-        
-        struct json *j = json_parse(data);
-        if (j == NULL) {
-                free(data);
-                return NULL;
+    memset(out, 0, sizeof *out);
+    StrBuf body;
+    sb_init(&body, MAX_RPC_BYTES);
+    if (http_get(url, &body) != 0) {
+        sb_free(&body);
+        return -1;
+    }
+    char err[128];
+    JVal *root = json_parse(body.data, body.len, err, sizeof err);
+    sb_free(&body);
+    if (root == NULL) {
+        fprintf(stderr, "error: invalid JSON from AUR: %s\n", err);
+        return -1;
+    }
+
+    const char *type = json_get_str(root, "type");
+    if (type == NULL) {
+        fprintf(stderr, "error: malformed AUR response (no type)\n");
+        json_free(root);
+        return -1;
+    }
+    if (strcmp(type, "error") == 0) {
+        fputs("error: AUR: ", stderr);
+        safe_fputs(stderr, json_get_str(root, "error"));
+        fputc('\n', stderr);
+        json_free(root);
+        return -1;
+    }
+    const JVal *results = json_get(root, "results");
+    if (results == NULL || results->t != J_ARR) {
+        fprintf(stderr, "error: malformed AUR response (no results)\n");
+        json_free(root);
+        return -1;
+    }
+
+    size_t n = json_len(results);
+    out->root = root;
+    out->pkgs = xcalloc(n ? n : 1, sizeof(AurPkg));
+    for (size_t i = 0; i < n; i++) {
+        const JVal *p = json_at(results, i);
+        const char *name = json_get_str(p, "Name");
+        const char *base = json_get_str(p, "PackageBase");
+        const char *ver = json_get_str(p, "Version");
+        if (!valid_pkgname(name) || !valid_pkgname(base) || !valid_version(ver)) {
+            fputs("warning: ignoring AUR record with invalid name/base/version: ", stderr);
+            safe_fputs(stderr, name ? name : "(null)");
+            fputc('\n', stderr);
+            continue;
         }
-        free(data);
-
-        struct rpc_data *rpc_data = safe_malloc(sizeof(struct rpc_data));
-        
-        size_t resultcount = json_get_dict_number(j, "resultcount");
-        struct json *results = json_get_dict_item(j, "results");
-        char *error = NULL;
-
-        char *result_type_str = json_get_dict_string(j, "type");
-        rpc_result_t result_type = rpc_error;
-        if (strcmp(result_type_str, "multiinfo") == 0)
-                result_type = rpc_multiinfo;
-        else if (strcmp(result_type_str, "search") == 0)
-                result_type = rpc_search;
-        else if (strcmp(result_type_str, "error") == 0) {
-                result_type = rpc_error;
-                error = safe_strdup(json_get_dict_string(j, "error"));
-        }
-
-        rpc_data->resultcount = resultcount;
-        rpc_data->results = results;
-        rpc_data->error = NULL;
-        rpc_data->error = error;
-        rpc_data->type = result_type;
-        rpc_data->raw_json = j;
-
-        return rpc_data;
+        AurPkg *a = &out->pkgs[out->n++];
+        a->name = xstrdup(name);
+        a->base = xstrdup(base);
+        a->version = xstrdup(ver);
+        a->desc = xstrdup(json_get_str(p, "Description"));
+        double ood = 0;
+        if (json_get_num(p, "OutOfDate", &ood) && ood > 0)
+            a->outofdate = (long)ood;
+        const JVal *m = json_get(p, "Maintainer");
+        a->orphan = (m == NULL || m->t == J_NULL);
+        a->raw = p;
+    }
+    return 0;
 }
 
-void free_rpc_data(struct rpc_data *data)
+int rpc_info(const StrList *names, RpcResult *out)
 {
-        if (data == NULL)
-                return;
-        
-        if (data->error != NULL)
-                free(data->error);
-
-        free_json_item(data->raw_json);
-        free(data);
+    StrBuf url;
+    sb_init(&url, 8192);
+    sb_puts(&url, AUR_RPC_BASE "/info?");
+    for (size_t i = 0; i < names->n; i++) {
+        if (!valid_pkgname(names->v[i])) {
+            fprintf(stderr, "error: invalid package name\n");
+            sb_free(&url);
+            return -1;
+        }
+        if (i)
+            sb_putc(&url, '&');
+        sb_puts(&url, "arg%5B%5D=");
+        url_encode(&url, names->v[i]);
+    }
+    int r = rpc_call(url.data, out);
+    sb_free(&url);
+    return r;
 }
 
-struct package *parse_package_json(struct json *j)
+int rpc_search(const char *term, bool by_provides, RpcResult *out)
 {
-        if (j == NULL)
-                return NULL;
-
-        struct package *p = safe_malloc(sizeof(struct package));
-        memset(p, 0, sizeof(struct package));
-
-        struct json *name_j = json_get_dict_item(j, "Name");
-        struct json *desc_j = json_get_dict_item(j, "Description");
-        struct json *version_j = json_get_dict_item(j, "Version");
-        struct json *outofdate_j = json_get_dict_item(j, "OutOfDate");
-
-        if (name_j && name_j->type == json_string)
-                p->name = safe_strdup(name_j->data.string);
-        if (desc_j && desc_j->type == json_string)
-                p->desc = safe_strdup(desc_j->data.string);
-        if (version_j && version_j->type == json_string)
-                p->version = safe_strdup(version_j->data.string);
-        if (outofdate_j && outofdate_j->type == json_number)
-                p->outofdate = (long)outofdate_j->data.number;
-
-        struct json *depends_j = json_get_dict_item(j, "Depends");
-        if (depends_j && depends_j->type == json_array) {
-                p->depends_count = json_get_size(depends_j);
-                p->depends = safe_malloc(sizeof(char *) * p->depends_count);
-                for (size_t i = 0; i < p->depends_count; i++) {
-                        p->depends[i] = safe_strdup(json_get_array_string(depends_j, i));
-                }
-        }
-
-        struct json *makedepends_j = json_get_dict_item(j, "MakeDepends");
-        if (makedepends_j && makedepends_j->type == json_array) {
-                p->makedepends_count = json_get_size(makedepends_j);
-                p->makedepends = safe_malloc(sizeof(char *) * p->makedepends_count);
-                for (size_t i = 0; i < p->makedepends_count; i++) {
-                        p->makedepends[i] = safe_strdup(json_get_array_string(makedepends_j, i));
-                }
-        }
-
-        return p;
+    if (!valid_search_term(term)) {
+        fprintf(stderr, "error: invalid search term (2-128 printable chars)\n");
+        return -1;
+    }
+    StrBuf url;
+    sb_init(&url, 4096);
+    sb_puts(&url, AUR_RPC_BASE "/search/");
+    url_encode(&url, term);
+    sb_puts(&url, by_provides ? "?by=provides" : "?by=name-desc");
+    int r = rpc_call(url.data, out);
+    sb_free(&url);
+    return r;
 }
 
-void free_package_data(struct package *p)
+void rpc_result_free(RpcResult *r)
 {
-        if (p == NULL)
-                return;
+    for (size_t i = 0; i < r->n; i++) {
+        free(r->pkgs[i].name);
+        free(r->pkgs[i].base);
+        free(r->pkgs[i].version);
+        free(r->pkgs[i].desc);
+    }
+    free(r->pkgs);
+    json_free(r->root);
+    memset(r, 0, sizeof *r);
+}
 
-        free(p->name);
-        free(p->desc);
-        free(p->version);
-
-        for (size_t i = 0; i < p->depends_count; i++)
-                free(p->depends[i]);
-        free(p->depends);
-
-        for (size_t i = 0; i < p->makedepends_count; i++)
-                free(p->makedepends[i]);
-        free(p->makedepends);
-
-        free(p);
+const AurPkg *rpc_find(const RpcResult *r, const char *name)
+{
+    for (size_t i = 0; i < r->n; i++)
+        if (strcmp(r->pkgs[i].name, name) == 0)
+            return &r->pkgs[i];
+    return NULL;
 }

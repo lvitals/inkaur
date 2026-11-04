@@ -3,20 +3,26 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-#define ASSERT(condition, message) \
+extern int tests_run;
+
+#define ASSERT(cond, msg) \
     do { \
-        if (!(condition)) { \
-            fprintf(stderr, "FAILED: %s (%s:%d)\n", message, __FILE__, __LINE__); \
+        tests_run++; \
+        if (!(cond)) { \
+            fprintf(stderr, "FAILED: %s (%s:%d)\n", msg, __FILE__, __LINE__); \
             exit(1); \
         } \
     } while (0)
 
-#define ASSERT_STR_EQ(actual, expected, message) \
+#define ASSERT_STR_EQ(actual, expected, msg) \
     do { \
-        if (strcmp(actual, expected) != 0) { \
-            fprintf(stderr, "FAILED: %s\n  Actual:   \"%s\"\n  Expected: \"%s\"\n  (%s:%d)\n", \
-                    message, actual, expected, __FILE__, __LINE__); \
+        tests_run++; \
+        const char *a_ = (actual), *e_ = (expected); \
+        if (a_ == NULL || strcmp(a_, e_) != 0) { \
+            fprintf(stderr, "FAILED: %s\n  actual:   \"%s\"\n  expected: \"%s\"\n  (%s:%d)\n", \
+                    msg, a_ ? a_ : "(null)", e_, __FILE__, __LINE__); \
             exit(1); \
         } \
     } while (0)

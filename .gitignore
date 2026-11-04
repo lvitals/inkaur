@@ -1,10 +1,9 @@
 *.o
+*.d
 *.gcno
 *.gcda
 *.gcov
 *.log
 /inkaur
 /tests/run_tests
-tests/unit/test_json
-tests/unit/test_util
-tests/functional/test_cli
+/build-test/

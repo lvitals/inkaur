@@ -1,11 +1,22 @@
 #ifndef ALLOC_H
 #define ALLOC_H
 
-#include <stdlib.h>
+#include <stddef.h>
 
-void *safe_malloc(size_t s);
-void *safe_calloc(int n, size_t s);
-void *safe_realloc(void *ptr, size_t s);
-char *safe_strdup(const char *str);
+/*
+ * Allocation wrappers: abort the process on OOM and on size overflow so
+ * callers never operate on a short buffer.
+ */
+void *xmalloc(size_t n);
+void *xcalloc(size_t n, size_t size);
+void *xrealloc(void *p, size_t n);
+void *xreallocarray(void *p, size_t n, size_t size);
+char *xstrdup(const char *s);
+char *xstrndup(const char *s, size_t n);
+char *xasprintf(const char *fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
 
-#endif  /* ALLOC_H */
+#endif /* ALLOC_H */

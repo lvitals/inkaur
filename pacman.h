@@ -1,29 +1,24 @@
 #ifndef PACMAN_H
 #define PACMAN_H
 
-#include <alpm.h>
+#include "buf.h"
+
 #include <stdbool.h>
 
-typedef struct {
-    char *name;
-    char *version;
-} ForeignPkg;
+/*
+ * Thin wrappers over /usr/bin/pacman (no libalpm linkage). Every target is
+ * validated by the caller and passed after "--".
+ */
 
-/* Initializes the ALPM handle. Needs to be called once. */
-alpm_handle_t *pacman_init_handle(void);
-
-/* Frees the ALPM handle. */
-void pacman_cleanup_handle(alpm_handle_t *handle);
-
-/* Checks if a package is installed locally. */
-bool pacman_is_package_installed(alpm_handle_t *handle, const char *pkgname);
-
-/* Checks if a package is available in any sync database. */
-bool pacman_package_in_sync_db(alpm_handle_t *handle, const char *pkgname);
-
-/* Lists all packages not found in sync databases (foreign packages). 
-   Equivalent to 'pacman -Qm'. */
-ForeignPkg *pacman_get_foreign_packages(alpm_handle_t *handle, size_t *count);
-void list_installed_aur_packages(const char *operation);
+/* Dependency string satisfied by an installed package (pacman -T). */
+bool pacman_dep_satisfied(const char *dep);
+/* Dependency string resolvable from the sync repositories (pacman -Sp). */
+bool pacman_dep_in_repos(const char *dep);
+/* Installed version of name into out (caller frees), or NULL. */
+char *pacman_installed_version(const char *name);
+/* Foreign packages ("pacman -Qm"): names[i] / versions[i]. */
+int pacman_foreign(StrList *names, StrList *versions);
+/* All installed package names, sorted. */
+int pacman_installed_names(StrList *out);
 
 #endif /* PACMAN_H */

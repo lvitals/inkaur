@@ -1,16 +1,12 @@
 #ifndef SEARCH_H
 #define SEARCH_H
 
-#include <stdbool.h>
+#include "buf.h"
 
-#define MIN3(a, b, c) ((a) < (b) ? ((a) < (c) ? (a) : (c)) : \
-                ((b) < (c) ? (b) : (c)))
+#include <stddef.h>
 
-int levenshtein(char *s1, char *s2);
-int package_qsort_levenshtein(const void *one, const void *two);
-void print_search_result(bool istty, char *name, 
-                char *desc, char *ver, int ood, bool installed);
-int search_aur(int n, char **terms);
-void show_package_info(const char *package_name);
+size_t levenshtein(const char *a, const char *b);
+int cmd_search(const StrList *terms);
+int cmd_info(const StrList *names);
 
-#endif  /* SEARCH_H */
+#endif /* SEARCH_H */

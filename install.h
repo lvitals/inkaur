@@ -1,15 +1,21 @@
 #ifndef INSTALL_H
 #define INSTALL_H
 
-#include "json.h"
+#include "buf.h"
 
 #include <stdbool.h>
 
-int import_pgp_keys(char *path);
-int install_package(char *name, char *cache_path);
-HashMap *get_installed_packages(void);
-int update_packages(char *cache_path);
-int clean_cache(char *cache_path);
-int remove_packages(int n, char **pkgs);
+typedef struct {
+    bool noconfirm;      /* only for pacman/makepkg prompts; reviews always ask */
+    bool needed;
+    const char *chroot;  /* devtools chroot dir (contains root/), or NULL */
+    const char *cache;
+} Options;
 
-#endif  /* INSTALL_H */
+int cmd_sync(const StrList *targets, const Options *o);
+int cmd_upgrade(const Options *o, bool sync_repos);
+int cmd_clean(const Options *o, bool all);
+/* Returns the highest severity (0..3) or 4 on error. */
+int cmd_audit_dir(const char *dir);
+
+#endif /* INSTALL_H */

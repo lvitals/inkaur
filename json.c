@@ -1,774 +1,489 @@
 #include "json.h"
 #include "alloc.h"
+#include "buf.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
-#include <stdarg.h>
 #include <string.h>
-#include <ctype.h>
 
-HMItem *new_item(char *key, void *val,
-                void (*k_free_func)(void *), void (*v_free_func)(void *))
+typedef struct {
+    const char *s;
+    size_t i, n;
+    int depth;
+    size_t items;
+    char *err;
+    size_t errsz;
+} Parser;
+
+static JVal *parse_value(Parser *p);
+
+static void fail(Parser *p, const char *msg)
 {
-	HMItem *item = safe_calloc(1, sizeof(*item));
-
-	item->key = key;
-	item->val = val;
-	item->k_free_func = k_free_func;
-	item->v_free_func = v_free_func;
-
-	return item;
+    if (p->err && p->err[0] == '\0')
+        snprintf(p->err, p->errsz, "%s at offset %zu", msg, p->i);
 }
 
-void free_item(HMItem *item)
+static void skip_ws(Parser *p)
 {
-	if (item == NULL)
-		return;
-
-	if (item->key != NULL && item->k_free_func != NULL)
-		item->k_free_func(item->key);
-	if (item->val != NULL && item->v_free_func != NULL)
-		item->v_free_func(item->val);
-
-	free(item);
+    while (p->i < p->n) {
+        char c = p->s[p->i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+            p->i++;
+        else
+            break;
+    }
 }
 
-HashMap *new_hashmap(size_t capacity)
+static JVal *new_val(JType t)
 {
-	HashMap *map = safe_calloc(1, sizeof(*map));
-
-	size_t real_capacity = 1;
-	while (real_capacity < capacity) real_capacity *= 2;
-	if (real_capacity < 4) real_capacity = 4;
-
-	map->can_store = real_capacity;
-	map->stored = 0;
-	map->items = safe_calloc(map->can_store, sizeof(HMItem *));
-
-	return map;
+    JVal *v = xcalloc(1, sizeof *v);
+    v->t = t;
+    return v;
 }
 
-void free_hashmap(HashMap *map)
+void json_free(JVal *v)
 {
-	if (map == NULL)
-		return;
-
-	for (size_t i = 0; i < map->can_store; i++)
-		free_item(map->items[i]);
-
-	free(map->items);
-	free(map);
-}
-
-static void _hashmap_set_no_resize(HashMap *map, HMItem *item)
-{
-	uint64_t hash = hashmap_hash_func(item->key);
-	size_t index = (size_t)(hash & (uint64_t)(map->can_store - 1));
-
-	while (map->items[index] != NULL) {
-		if (strcmp(item->key, map->items[index]->key) == 0) {
-			free_item(map->items[index]);
-			map->items[index] = item;
-			return;
-		}
-
-		index++;
-		if (index >= map->can_store)
-			index = 0;
-	}
-
-	map->items[index] = item;
-	map->stored++;
-}
-
-int check_hashmap_capacity(HashMap *map, size_t n)
-{
-	if (!((map->stored + n + 1) > map->can_store))
-		return 0;
-
-	size_t old_capacity = map->can_store;
-	HMItem **old_items = map->items;
-
-	size_t new_capacity = old_capacity * 2;
-	if (new_capacity < 16) new_capacity = 16;
-
-	map->items = safe_calloc(new_capacity, sizeof(HMItem *));
-	map->can_store = new_capacity;
-	map->stored = 0;
-
-	for (size_t i = 0; i < old_capacity; i++) {
-		if (old_items[i] != NULL) {
-			_hashmap_set_no_resize(map, old_items[i]);
-		}
-	}
-
-	free(old_items);
-
-	return 0;
-}
-
-int hashmap_set(HashMap *map, HMItem *item)
-{
-	check_hashmap_capacity(map, 1);
-	_hashmap_set_no_resize(map, item);
-        
-        return 0;
-}
-
-/* TODO: https://github.com/benhoyt/ht/blob/master/ht.c */
-uint64_t hashmap_hash_func(char *key)
-{
-	uint64_t hash = FNV_OFFSET;
-	for (const char* p = key; *p; p++) {
-		hash ^= (uint64_t)(unsigned char)(*p);
-		hash *= FNV_PRIME;
-	}
-	return hash;
-}
-
-void *hashmap_index(HashMap *map, char *key)
-{
-	uint64_t hash = hashmap_hash_func(key);
-	size_t index = (size_t)(hash & (uint64_t)(map->can_store - 1));
-
-        if (map->items[index] == NULL)
-                goto collision;
-
-	if (strcmp(map->items[index]->key, key) == 0)
-		return map->items[index]->val;
-
-collision:
-
-        for (size_t i = 0; i < map->can_store; i++) {
-                if (map->items[i] == NULL)
-                        continue;
-                if (strcmp(map->items[i]->key, key) == 0)
-                        return map->items[i]->val;
-	}
-
-	return NULL;
-}
-
-void hashmap_remove(HashMap *map, char *key)
-{
-	uint64_t hash = hashmap_hash_func(key);
-	size_t index = (size_t)(hash & (uint64_t)(map->can_store - 1));
-
-	while (map->items[index] != NULL) {
-		if (strcmp(map->items[index]->key, key) == 0) {
-			free_item(map->items[index]);
-			map->items[index] = NULL;
-			map->stored--;
-		}
-
-		/* collision */
-		index++;
-		if (index >= map->can_store)
-			index = 0;
-	}
-}
-
-/* Begin JSON implementation */
-
-struct json *new_json(void)
-{
-        struct json *j = safe_calloc(1, sizeof(struct json));
-        j->type = json_null;
-
-        return j;
-}
-
-void free_json_item(struct json *j)
-{
-        if (j == NULL)
-                return;
-
-        switch (j->type) {
-        case json_string:
-                free(j->data.string);
-                break;
-        case json_array:
-                for (int i = 0; i < j->n_data_items; i++)
-                        free_json_item(j->data.json_data_array[i]);
-
-                free(j->data.json_data_array);
-                break;
-        case json_dict:
-                free_hashmap(j->data.json_data_dict);
-                break;
-        default:
-                break;
+    if (v == NULL)
+        return;
+    switch (v->t) {
+    case J_STR:
+        free(v->u.s);
+        break;
+    case J_ARR:
+        for (size_t i = 0; i < v->u.a.n; i++)
+            json_free(v->u.a.items[i]);
+        free(v->u.a.items);
+        break;
+    case J_OBJ:
+        for (size_t i = 0; i < v->u.o.n; i++) {
+            free(v->u.o.keys[i]);
+            json_free(v->u.o.vals[i]);
         }
-
-        free(j);
+        free(v->u.o.keys);
+        free(v->u.o.vals);
+        break;
+    default:
+        break;
+    }
+    free(v);
 }
 
-void print_json(struct json *j)
+static int hexval(char c)
 {
-        HashMap *dict;
-        switch (j->type) {
-        case json_bool:
-                if (j->data.boolean)
-                        printf("true\n");
-                else
-                        printf("false\n");
-
-                break;
-        case json_string:
-                printf("%s\n", j->data.string);
-                break;
-        case json_array:
-                for (int i = 0; i < j->n_data_items; i++)
-                        print_json(j->data.json_data_array[i]);
-                break;
-        case json_dict:
-                dict = j->data.json_data_dict;
-                for (int i = 0; i < (int)dict->can_store; i++) {
-                        HMItem *item = dict->items[i];
-
-                        if (item == NULL)
-                                continue;
-
-                        printf("\"%s\": ", dict->items[i]->key);
-                        print_json(dict->items[i]->val);
-                }
-                break;
-        case json_number:
-                printf("%f\n", j->data.number);
-                break;
-        case json_null:
-                printf("null\n");
-                break;
-        }
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
 }
 
-HMItem *json_parse_dict_tuple(char *str, int *idx)
+static bool read_hex4(Parser *p, uint32_t *out)
 {
-        size_t len = strlen(str);
-        size_t start;
-        for (start = 0; start < len; start++) {
-                if (!isspace(str[start]))
-                        break;
-        }
-
-        int key_end_idx;
-        struct json *json_key = json_parse_string(str + start, &key_end_idx);
-        if (json_key == NULL)
-                return NULL;
-
-        key_end_idx += start;
-
-        size_t val_start;
-        for (val_start = key_end_idx; val_start < len; val_start++) {
-                if (!isspace(str[val_start]) && str[val_start] != ':')
-                        break;
-        }
-
-        int val_end_idx;
-        struct json *val = json_parse_item(str + val_start, &val_end_idx);
-        if (val == NULL) {
-                free_json_item(json_key);
-                return NULL;
-        }
-
-        val_end_idx += val_start;
-
-        char *key = json_key->data.string;
-        free(json_key);
-
-        if (idx != NULL)
-                *idx = val_end_idx;
-
-        struct HMItem *tuple = new_item(key, val, free,
-                        hashmap_item_free_func(free_json_item));
-        
-        return tuple;
+    if (p->n - p->i < 4)
+        return false;
+    uint32_t v = 0;
+    for (int k = 0; k < 4; k++) {
+        int h = hexval(p->s[p->i + (size_t)k]);
+        if (h < 0)
+            return false;
+        v = (v << 4) | (uint32_t)h;
+    }
+    p->i += 4;
+    *out = v;
+    return true;
 }
 
-struct json *json_parse_dict(char *str, int *idx)
+static void put_utf8(StrBuf *b, uint32_t cp)
 {
-        struct json *j = new_json();
-        j->type = json_dict;
-
-        size_t len = strlen(str);
-        size_t start;
-        for (start = 0; start < len; start++) {
-                if (!isspace(str[start]))
-                        break;
-        }
-
-        HashMap *dict = new_hashmap(16);
-        j->data.json_data_dict = dict;
-
-        bool done = false;
-        size_t current_idx = start + 1;
-        for (size_t i = start + 1; i < len; i++) {
-                char c = str[i];
-
-                if (isspace(c)) {
-                        current_idx++;
-                        continue;
-                }
-
-                if (c == '}') {
-                        current_idx++;
-                        break;
-                }
-
-                int end_idx;
-                HMItem *current_tuple = json_parse_dict_tuple(
-                                str + current_idx, &end_idx);
-
-                if (current_tuple == NULL) {
-                        free_json_item(j);
-                        return NULL;
-                }
-
-                current_idx += end_idx;
-
-                for (; current_idx < len; current_idx++) {
-                        char cc = str[current_idx];
-                        if (cc == '}') {
-                                current_idx++;
-                                done = true;
-                                goto append;
-                        }
-
-                        if (!isspace(cc) && cc != ',')
-                                break;
-                }
-
-append:
-                i = current_idx;
-
-                hashmap_set(dict, current_tuple);
-
-                if (done)
-                        break;
-        }
-
-        j->n_data_items = j->data.json_data_dict->stored;
-        j->data_list_capacity = j->data.json_data_dict->can_store;
-
-        if (idx != NULL)
-                *idx = current_idx;
-
-        return j;
+    char tmp[4];
+    size_t n;
+    if (cp < 0x80) {
+        tmp[0] = (char)cp; n = 1;
+    } else if (cp < 0x800) {
+        tmp[0] = (char)(0xC0 | (cp >> 6));
+        tmp[1] = (char)(0x80 | (cp & 0x3F)); n = 2;
+    } else if (cp < 0x10000) {
+        tmp[0] = (char)(0xE0 | (cp >> 12));
+        tmp[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        tmp[2] = (char)(0x80 | (cp & 0x3F)); n = 3;
+    } else {
+        tmp[0] = (char)(0xF0 | (cp >> 18));
+        tmp[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        tmp[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        tmp[3] = (char)(0x80 | (cp & 0x3F)); n = 4;
+    }
+    sb_append(b, tmp, n);
 }
 
-struct json *json_parse_string(char *str, int *idx)
+/* Parses a string starting at the opening quote; returns malloc'd text. */
+static char *parse_string_raw(Parser *p)
 {
-        struct json *j = new_json();
-        j->type = json_string;
-
-        size_t len = strlen(str);
-
-        if (strncmp(str, "\"\"", strlen("\"\"")) == 0) {
-                j->data.string = safe_strdup("");
-                if (idx != NULL)
-                        *idx = 2;
-
-                return j;
-        }
-
-        size_t start;
-        for (start = 0; start < len; start++) {
-                if (!isspace(str[start]) && str[start] != '"')
-                        break;
-        }
-
-        size_t size = 1024;
-        size_t buffer_i = 0;
-        char *buffer = safe_malloc(sizeof(char) * size);
-
-        bool escaped = false;
-        size_t i;
-        for (i = start; i < len; i++) {
-                char c = str[i];
-                if (c == '\\') {
-                        escaped = true;
-                        continue;
-                }
-
-                if (!escaped && c == '"')
-                        break;
-
-                if (buffer_i + 2 > size) {
-                        buffer = safe_realloc(buffer, sizeof(char) * (size += 512));
-                }
-
-                buffer[buffer_i++] = c;
-                buffer[buffer_i] = 0;
-
-                if (escaped)
-                        escaped = false;
-        }
-
-        if (i != start)
-                i++;
-
-        if (idx != NULL)
-                *idx = i;
-
-        j->data.string = buffer;
-
-        return j;
-}
-
-struct json *json_parse_array(char *str, int *idx)
-{
-        struct json *j = new_json();
-        j->type = json_array;
-
-        size_t len = strlen(str);
-
-        size_t start;
-        for (start = 0; start < len; start++) {
-                if (!isspace(str[start]))
-                        break;
-        }
-        start++;  /* skip first bracket */
-
-        for (; start < len; start++) {
-                if (!isspace(str[start]))
-                        break;
-        }
-
-
-        size_t capacity = 4;
-        size_t array_i = 0;
-        struct json **array = safe_calloc(capacity, sizeof(struct json *));
-        
-        j->data.json_data_array = array;
-
-        if (str[start]== ']') {
-                j->n_data_items = array_i;
-                j->data_list_capacity = capacity;
-                if (idx != NULL)
-                        *idx = start + 1;
-                return j;
-        }
-
-        size_t current_point = start;
-        size_t i;
-        for (i = start; i < len; i++) {
-                int current_element_end;
-                struct json *elem = json_parse_item(str + current_point,
-                                &current_element_end);
-
-                if (elem == NULL) {
-                        free_json_item(j);
-                        return NULL; 
-                }
-
-                current_point += current_element_end;
-                for (; current_point < len; current_point++) {
-                        char cc = str[current_point];
-                        if (!isspace(cc) && cc != ',')
-                                break;
-                }
-
-                if (array_i + 1 > capacity) {
-                        array = safe_realloc(array, sizeof(struct json *) * (capacity += 4));
-                        j->data.json_data_array = array;
-                }
-
-                array[array_i++] = elem;
-
-                if (str[current_point] == ']') {
-                        i = current_point + 1;
-                        break;
-                }
-
-                i = current_point;
-        }
-
-        j->n_data_items = array_i;
-        j->data_list_capacity = capacity;
-
-        if (idx != NULL)
-                *idx = i;
-
-        return j;
-}
-
-struct json *json_parse_number(char *str, int *idx)
-{
-        struct json *j = new_json();
-        j->type = json_number;
-
-        size_t len = strlen(str);
-        size_t start;
-        for (start = 0; start < len; start++) {
-                if (!isspace(str[start]))
-                        break;
-        }
-
-        size_t i;
-
-        size_t capacity = 16;
-        size_t data_i = 0;
-        char *data = safe_malloc(sizeof(char) * capacity);
-
-        for (i = start; i < len; i++) {
-                char c = str[i];
-                bool is_valid = false;
-
-                if (isdigit(c) || c == '.') {
-                        is_valid = true;
-                } else if (c == 'e' || c == 'E') {
-                        is_valid = true;
-                } else if (c == '-' || c == '+') {
-                        /* sign is only valid at the start or after e/E */
-                        if (i == start) {
-                                is_valid = true;
-                        } else {
-                                char prev = str[i-1];
-                                if (prev == 'e' || prev == 'E') {
-                                        is_valid = true;
-                                }
-                        }
-                }
-
-                if (!is_valid)
-                        break;
-
-                if (data_i + 2 > capacity) {
-                        data = safe_realloc(data, sizeof(char) * (capacity += 4));
-                }
-
-                data[data_i++] = c;
-                data[data_i] = 0;
-        }
-
-        sscanf(data, "%lf", &j->data.number);
-        free(data);
-
-        if (idx != NULL)
-                *idx = i;
-
-        return j;
-}
-
-struct json *json_parse_bool(char *str, int *idx)
-{
-        struct json *j = new_json();
-        j->type = json_bool;
-
-        size_t len = strlen(str);
-        size_t start;
-        for (start = 0; start < len; start++) {
-                if (!isspace(str[start]))
-                        break;
-        }
-
-        int stop_idx = start;
-        size_t tl = strlen("true");
-        size_t fl = strlen("false");
-
-        if (strncmp(str + start, "true", tl) == 0) {
-                j->data.boolean = true;
-                stop_idx += tl;
-        } else {
-                j->data.boolean = false;
-                stop_idx += fl;
-        }
-
-        if (idx != NULL)
-                *idx = stop_idx;
-
-        return j;
-}
-
-struct json *json_parse_null(char *str, int *idx)
-{
-        struct json *j = new_json();
-        j->type = json_null;
-
-        size_t len = strlen(str);
-        size_t start;
-        for (start = 0; start < len; start++) {
-                if (!isspace(str[start]))
-                        break;
-        }
-
-        int end_idx = start + strlen("null");
-        if (idx != NULL)
-                *idx = end_idx;
-
-        return j;
-}
-
-struct json *json_parse_item(char *str, int *idx)
-{
-        size_t len = strlen(str);
-        size_t start;
-
-        /* skip leading whitespace if there is any */
-        for (start = 0; start < len; start++) {
-                if (!isspace(str[start]))
-                        break;
-        }
-
-        int end_idx = 0;
-        struct json *j = NULL;
-
-        char c = str[start];
-        switch (c) {
-        case '{':
-                j = json_parse_dict(str + start, &end_idx);
-                break;
-        case '[':
-                j = json_parse_array(str + start, &end_idx);
-                break;
-        case '"':
-                j = json_parse_string(str + start, &end_idx);
-                break;
-        default:
-                if (c == 'n')  /* null */
-                        j = json_parse_null(str + start, &end_idx);
-                else if (isdigit(c) || c == '-')  /* number */
-                        j = json_parse_number(str + start, &end_idx);
-                else if (c == 't' || c == 'f')  /* true / false */
-                        j = json_parse_bool(str + start, &end_idx);
-
-                break;
-        }
-
-        if (idx != NULL)
-                *idx = end_idx;
-
-        return j;
-}
-
-struct json *json_get_array_item(struct json *arr, int idx)
-{
-        if (idx >= arr->n_data_items)
-                return NULL;
-
-        return arr->data.json_data_array[idx];
-}
-
-struct json *json_get_dict_item(struct json *dict, char *key)
-{
-        HashMap *map = dict->data.json_data_dict;
-        return (struct json *)hashmap_index(map, key);
-}
-
-int json_get_size(struct json *arr)
-{
-        return arr->n_data_items;
-}
-
-int json_get_capacity(struct json *arr)
-{
-        return arr->data_list_capacity;
-}
-
-bool _is_whole_number(char *s)
-{
-        size_t len = strlen(s);
-        for (size_t i = 0; i < len; i++) {
-                if (!isdigit(s[i]) && !(i == 0 && s[i] == '-'))
-                        return false;
-        }
-
-        return true;
-}
-
-struct json *json_access(struct json *j, ...)
-{
-        va_list ap;
-        va_start(ap, j);
-
-        struct json *current = j;
-
-        char *arg;
-        while ((arg = va_arg(ap, char *)) != NULL) {
-                struct json *s;
-                if (_is_whole_number(arg)) {
-                        int d;
-                        sscanf(arg, "%d", &d);
-
-                        s = json_get_array_item(current, d);
-                        if (s == NULL)
-                                return NULL;
-                } else {
-                        s = json_get_dict_item(current, arg);
-                        if (s == NULL)
-                                return NULL;
-                }
-
-
-                current = s;
-        }
-
-        va_end(ap);
-
-        return current;
-}
-
-struct json *json_safe_access(struct json *j, char *fmt, ...)
-{
-        /* if fmt is read-only strtok() will fail */
-        char *fmt_cpy = safe_strdup(fmt);  
-        va_list ap;
-        va_start(ap, fmt);
-
-        struct json *current = j;
-
-        char *ptr = strtok(fmt_cpy, " ");
-        while (ptr != NULL) {
-                if (strcmp(ptr, "%s") == 0) {
-                        char *arg = va_arg(ap, char *);
-                        current = json_get_dict_item(current, arg);
-                        if (current == NULL)
-                                goto fail;
-                } else if (strcmp(ptr, "%d") == 0) {
-                        int arg = va_arg(ap, int);
-                        current = json_get_array_item(current, arg);
-                        if (current == NULL)
-                                goto fail;
-                } else {
-                        goto fail;
-                }
-
-                ptr = strtok(NULL, " ");
-        }
-
-        free(fmt_cpy);
-        va_end(ap);
-
-        return current;
-
-fail:
-        free(fmt_cpy);
-        va_end(ap);
+    if (p->i >= p->n || p->s[p->i] != '"') {
+        fail(p, "expected string");
         return NULL;
+    }
+    p->i++;
+    StrBuf b;
+    sb_init(&b, JSON_MAX_STRING);
+    while (p->i < p->n) {
+        unsigned char c = (unsigned char)p->s[p->i];
+        if (c == '"') {
+            p->i++;
+            return b.data;
+        }
+        if (c < 0x20) {
+            fail(p, "control character in string");
+            goto bad;
+        }
+        if (c != '\\') {
+            if (sb_putc(&b, (char)c) != 0) {
+                fail(p, "string too long");
+                goto bad;
+            }
+            p->i++;
+            continue;
+        }
+        p->i++;
+        if (p->i >= p->n)
+            break;
+        char e = p->s[p->i++];
+        int r = 0;
+        switch (e) {
+        case '"':  r = sb_putc(&b, '"'); break;
+        case '\\': r = sb_putc(&b, '\\'); break;
+        case '/':  r = sb_putc(&b, '/'); break;
+        case 'b':  r = sb_putc(&b, '\b'); break;
+        case 'f':  r = sb_putc(&b, '\f'); break;
+        case 'n':  r = sb_putc(&b, '\n'); break;
+        case 'r':  r = sb_putc(&b, '\r'); break;
+        case 't':  r = sb_putc(&b, '\t'); break;
+        case 'u': {
+            uint32_t cp;
+            if (!read_hex4(p, &cp)) {
+                fail(p, "bad \\u escape");
+                goto bad;
+            }
+            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                uint32_t lo;
+                if (p->n - p->i < 2 || p->s[p->i] != '\\' || p->s[p->i + 1] != 'u') {
+                    fail(p, "lone high surrogate");
+                    goto bad;
+                }
+                p->i += 2;
+                if (!read_hex4(p, &lo) || lo < 0xDC00 || lo > 0xDFFF) {
+                    fail(p, "bad low surrogate");
+                    goto bad;
+                }
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                fail(p, "lone low surrogate");
+                goto bad;
+            }
+            if (cp == 0) {
+                fail(p, "NUL in string");
+                goto bad;
+            }
+            size_t before = b.len;
+            put_utf8(&b, cp);
+            if (b.len == before)
+                r = -1;
+            break;
+        }
+        default:
+            fail(p, "invalid escape");
+            goto bad;
+        }
+        if (r != 0) {
+            fail(p, "string too long");
+            goto bad;
+        }
+    }
+    fail(p, "unterminated string");
+bad:
+    sb_free(&b);
+    return NULL;
 }
 
-char *json_read_file(char *path)
+static bool is_digit(char c)
 {
-        FILE *fp = fopen(path, "rb");
-        if (!fp)
-                return NULL;
+    return c >= '0' && c <= '9';
+}
 
-        size_t capacity = 1024;
-        size_t buffer_i = 0;
-        char *buffer = safe_malloc(sizeof(char) * capacity);
-
-        int c;
-        while ((c = fgetc(fp)) != EOF) {
-                if (buffer_i + 2 > capacity) {
-                        buffer = safe_realloc(buffer, sizeof(char) * (capacity += 512));
-                }
-
-                buffer[buffer_i++] = c;
-                buffer[buffer_i] = 0;
+static JVal *parse_number(Parser *p)
+{
+    size_t start = p->i;
+    if (p->i < p->n && p->s[p->i] == '-')
+        p->i++;
+    if (p->i >= p->n) {
+        fail(p, "bad number");
+        return NULL;
+    }
+    if (p->s[p->i] == '0') {
+        p->i++;
+    } else if (is_digit(p->s[p->i])) {
+        while (p->i < p->n && is_digit(p->s[p->i]))
+            p->i++;
+    } else {
+        fail(p, "bad number");
+        return NULL;
+    }
+    if (p->i < p->n && p->s[p->i] == '.') {
+        p->i++;
+        if (p->i >= p->n || !is_digit(p->s[p->i])) {
+            fail(p, "bad fraction");
+            return NULL;
         }
+        while (p->i < p->n && is_digit(p->s[p->i]))
+            p->i++;
+    }
+    if (p->i < p->n && (p->s[p->i] == 'e' || p->s[p->i] == 'E')) {
+        p->i++;
+        if (p->i < p->n && (p->s[p->i] == '+' || p->s[p->i] == '-'))
+            p->i++;
+        if (p->i >= p->n || !is_digit(p->s[p->i])) {
+            fail(p, "bad exponent");
+            return NULL;
+        }
+        while (p->i < p->n && is_digit(p->s[p->i]))
+            p->i++;
+    }
+    size_t len = p->i - start;
+    if (len > 64) {
+        fail(p, "number too long");
+        return NULL;
+    }
+    char tmp[65];
+    memcpy(tmp, p->s + start, len);
+    tmp[len] = '\0';
+    JVal *v = new_val(J_NUM);
+    v->u.n = strtod(tmp, NULL);
+    return v;
+}
 
-        fclose(fp);
+static bool match_lit(Parser *p, const char *lit)
+{
+    size_t l = strlen(lit);
+    if (p->n - p->i < l || memcmp(p->s + p->i, lit, l) != 0)
+        return false;
+    p->i += l;
+    return true;
+}
 
-        return buffer;
+static bool count_item(Parser *p)
+{
+    if (++p->items > JSON_MAX_ITEMS) {
+        fail(p, "too many items");
+        return false;
+    }
+    return true;
+}
+
+static JVal *parse_array(Parser *p)
+{
+    p->i++; /* [ */
+    JVal *v = new_val(J_ARR);
+    size_t cap = 0;
+    skip_ws(p);
+    if (p->i < p->n && p->s[p->i] == ']') {
+        p->i++;
+        return v;
+    }
+    for (;;) {
+        if (!count_item(p))
+            goto bad;
+        JVal *item = parse_value(p);
+        if (item == NULL)
+            goto bad;
+        if (v->u.a.n == cap) {
+            cap = cap ? cap * 2 : 8;
+            v->u.a.items = xreallocarray(v->u.a.items, cap, sizeof(JVal *));
+        }
+        v->u.a.items[v->u.a.n++] = item;
+        skip_ws(p);
+        if (p->i < p->n && p->s[p->i] == ',') {
+            p->i++;
+            continue;
+        }
+        if (p->i < p->n && p->s[p->i] == ']') {
+            p->i++;
+            return v;
+        }
+        fail(p, "expected , or ]");
+        goto bad;
+    }
+bad:
+    json_free(v);
+    return NULL;
+}
+
+static JVal *parse_object(Parser *p)
+{
+    p->i++; /* { */
+    JVal *v = new_val(J_OBJ);
+    size_t cap = 0;
+    skip_ws(p);
+    if (p->i < p->n && p->s[p->i] == '}') {
+        p->i++;
+        return v;
+    }
+    for (;;) {
+        if (!count_item(p))
+            goto bad;
+        skip_ws(p);
+        char *key = parse_string_raw(p);
+        if (key == NULL)
+            goto bad;
+        for (size_t k = 0; k < v->u.o.n; k++) {
+            if (strcmp(v->u.o.keys[k], key) == 0) {
+                fail(p, "duplicate key");
+                free(key);
+                goto bad;
+            }
+        }
+        skip_ws(p);
+        if (p->i >= p->n || p->s[p->i] != ':') {
+            fail(p, "expected :");
+            free(key);
+            goto bad;
+        }
+        p->i++;
+        JVal *val = parse_value(p);
+        if (val == NULL) {
+            free(key);
+            goto bad;
+        }
+        if (v->u.o.n == cap) {
+            cap = cap ? cap * 2 : 8;
+            v->u.o.keys = xreallocarray(v->u.o.keys, cap, sizeof(char *));
+            v->u.o.vals = xreallocarray(v->u.o.vals, cap, sizeof(JVal *));
+        }
+        v->u.o.keys[v->u.o.n] = key;
+        v->u.o.vals[v->u.o.n] = val;
+        v->u.o.n++;
+        skip_ws(p);
+        if (p->i < p->n && p->s[p->i] == ',') {
+            p->i++;
+            continue;
+        }
+        if (p->i < p->n && p->s[p->i] == '}') {
+            p->i++;
+            return v;
+        }
+        fail(p, "expected , or }");
+        goto bad;
+    }
+bad:
+    json_free(v);
+    return NULL;
+}
+
+static JVal *parse_value(Parser *p)
+{
+    skip_ws(p);
+    if (p->i >= p->n) {
+        fail(p, "unexpected end");
+        return NULL;
+    }
+    if (++p->depth > JSON_MAX_DEPTH) {
+        fail(p, "nesting too deep");
+        return NULL;
+    }
+    JVal *v = NULL;
+    char c = p->s[p->i];
+    if (c == '{') {
+        v = parse_object(p);
+    } else if (c == '[') {
+        v = parse_array(p);
+    } else if (c == '"') {
+        char *s = parse_string_raw(p);
+        if (s) {
+            v = new_val(J_STR);
+            v->u.s = s;
+        }
+    } else if (c == '-' || is_digit(c)) {
+        v = parse_number(p);
+    } else if (match_lit(p, "true")) {
+        v = new_val(J_BOOL);
+        v->u.b = true;
+    } else if (match_lit(p, "false")) {
+        v = new_val(J_BOOL);
+        v->u.b = false;
+    } else if (match_lit(p, "null")) {
+        v = new_val(J_NULL);
+    } else {
+        fail(p, "unexpected character");
+    }
+    p->depth--;
+    return v;
+}
+
+JVal *json_parse(const char *s, size_t len, char *err, size_t errsz)
+{
+    Parser p;
+    memset(&p, 0, sizeof p);
+    p.s = s;
+    p.n = len;
+    p.err = err;
+    p.errsz = errsz;
+    if (err && errsz)
+        err[0] = '\0';
+    if (s == NULL) {
+        fail(&p, "no input");
+        return NULL;
+    }
+    if (memchr(s, '\0', len) != NULL) {
+        fail(&p, "NUL byte in input");
+        return NULL;
+    }
+    JVal *v = parse_value(&p);
+    if (v == NULL)
+        return NULL;
+    skip_ws(&p);
+    if (p.i != p.n) {
+        fail(&p, "trailing data");
+        json_free(v);
+        return NULL;
+    }
+    return v;
+}
+
+const JVal *json_get(const JVal *obj, const char *key)
+{
+    if (obj == NULL || obj->t != J_OBJ)
+        return NULL;
+    for (size_t i = 0; i < obj->u.o.n; i++)
+        if (strcmp(obj->u.o.keys[i], key) == 0)
+            return obj->u.o.vals[i];
+    return NULL;
+}
+
+const JVal *json_at(const JVal *arr, size_t i)
+{
+    if (arr == NULL || arr->t != J_ARR || i >= arr->u.a.n)
+        return NULL;
+    return arr->u.a.items[i];
+}
+
+size_t json_len(const JVal *v)
+{
+    return (v && v->t == J_ARR) ? v->u.a.n : 0;
+}
+
+const char *json_str(const JVal *v)
+{
+    return (v && v->t == J_STR) ? v->u.s : NULL;
+}
+
+const char *json_get_str(const JVal *obj, const char *key)
+{
+    return json_str(json_get(obj, key));
+}
+
+bool json_get_num(const JVal *obj, const char *key, double *out)
+{
+    const JVal *v = json_get(obj, key);
+    if (v == NULL || v->t != J_NUM)
+        return false;
+    *out = v->u.n;
+    return true;
 }

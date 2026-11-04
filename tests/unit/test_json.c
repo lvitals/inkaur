@@ -1,156 +1,84 @@
-#include "../../json.h"
-#include "../../alloc.h"
 #include "../test_helper.h"
-#include <string.h>
+#include "json.h"
+#include "rpc.h"
 
-void test_json_parse_string() {
-    char *json_str = "\"hello world\"";
-    int idx;
-    struct json *j = json_parse_string(json_str, &idx);
-    
-    ASSERT(j != NULL, "json_parse_string failed");
-    ASSERT(j->type == json_string, "type should be string");
-    ASSERT_STR_EQ(j->data.string, "hello world", "string content mismatch");
-    ASSERT(idx == 13, "index should be 13");
-    
-    free_json_item(j);
+#include <stdint.h>
+
+void run_json_tests(void);
+
+static JVal *P(const char *s)
+{
+    char err[128];
+    return json_parse(s, strlen(s), err, sizeof err);
 }
 
-void test_json_parse_number() {
-    char *json_str = "123.45";
-    int idx;
-    struct json *j = json_parse_number(json_str, &idx);
-    
-    ASSERT(j != NULL, "json_parse_number failed");
-    ASSERT(j->type == json_number, "type should be number");
-    ASSERT(j->data.number == 123.45, "number value mismatch");
-    
-    free_json_item(j);
+static void reject(const char *s, const char *msg)
+{
+    JVal *v = P(s);
+    ASSERT(v == NULL, msg);
 }
 
-void test_json_parse_array() {
-    char *json_str = "[\"a\", \"b\"]";
-    struct json *j = json_parse(json_str);
-    
-    ASSERT(j != NULL, "json_parse failed for array");
-    ASSERT(j->type == json_array, "type should be array");
-    ASSERT(j->n_data_items == 2, "array size mismatch");
-    
-    struct json *item0 = json_get_array_item(j, 0);
-    ASSERT(item0->type == json_string, "item 0 should be string");
-    ASSERT_STR_EQ(item0->data.string, "a", "item 0 content mismatch");
-    
-    free_json_item(j);
-}
+void run_json_tests(void)
+{
+    JVal *v = P("{\"type\":\"multiinfo\",\"resultcount\":1,\"results\":[{\"Name\":\"aide\","
+                "\"PackageBase\":\"aide\",\"Version\":\"0.18-1\",\"Depends\":[\"zlib\"],"
+                "\"Maintainer\":null,\"OutOfDate\":null,\"Desc\":\"a\\u00e9\\ud83d\\ude00\"}]}");
+    ASSERT(v != NULL, "valid RPC document");
+    const JVal *r0 = json_at(json_get(v, "results"), 0);
+    ASSERT_STR_EQ(json_get_str(r0, "Name"), "aide", "nested access");
+    ASSERT_STR_EQ(json_get_str(r0, "Desc"), "a\xc3\xa9\xf0\x9f\x98\x80", "unicode + surrogate pair");
+    ASSERT(json_get_str(r0, "Missing") == NULL, "missing key is NULL");
+    ASSERT(json_get_str(r0, "Depends") == NULL, "type-checked accessor");
+    ASSERT(json_len(json_get(r0, "Depends")) == 1, "array len");
+    ASSERT(json_at(json_get(r0, "Depends"), 5) == NULL, "out of range index");
+    ASSERT(json_get(NULL, "x") == NULL && json_at(NULL, 0) == NULL, "NULL-safe");
+    json_free(v);
 
-void test_json_parse_dict() {
-    char *json_str = "{\"key\": \"value\", \"num\": 123}";
-    struct json *j = json_parse(json_str);
-    ASSERT(j != NULL, "json_parse failed for dict");
-    ASSERT(j->type == json_dict, "type should be dict");
-    
-    struct json *val = json_get_dict_item(j, "key");
-    ASSERT(val != NULL, "failed to get dict item 'key'");
-    ASSERT_STR_EQ(val->data.string, "value", "dict value mismatch");
-    
-    free_json_item(j);
-}
+    reject("", "empty");
+    reject("{", "unterminated object");
+    reject("{\"a\":1,}", "trailing comma");
+    reject("[1,2", "unterminated array");
+    reject("\"abc", "unterminated string");
+    reject("\"a\\u0000b\"", "NUL escape");
+    reject("\"\\ud800\"", "lone surrogate");
+    reject("\"\\x41\"", "invalid escape");
+    reject("\"a\tb\"", "raw control char");
+    reject("{\"a\":1,\"a\":2}", "duplicate key");
+    reject("01", "leading zero");
+    reject("1.", "bad fraction");
+    reject("tru", "bad literal");
+    reject("{} {}", "trailing data");
+    reject("{\"a\" 1}", "missing colon");
 
-void test_json_parse_bool_null(void) {
-    struct json *j_true = json_parse("true");
-    struct json *j_false = json_parse("false");
-    struct json *j_null = json_parse("null");
+    /* nesting bomb */
+    char deep[JSON_MAX_DEPTH * 2 + 10];
+    size_t k = 0;
+    for (int i = 0; i < JSON_MAX_DEPTH + 2; i++)
+        deep[k++] = '[';
+    deep[k] = '\0';
+    reject(deep, "depth limit");
 
-    ASSERT(json_get_bool(j_true), "bool true mismatch");
-    ASSERT(!json_get_bool(j_false), "bool false mismatch");
-    ASSERT(j_null->type == json_null, "null parsing failed");
-
-    free_json_item(j_true);
-    free_json_item(j_false);
-    free_json_item(j_null);
-}
-
-void test_json_safe_access() {
-    struct json *j = json_parse("{\"results\": [{\"name\": \"inkaur\"}]}");
-    struct json *res = json_safe_access(j, "%s %d %s", "results", 0, "name");
-    ASSERT(res != NULL, "safe access failed");
-    ASSERT_STR_EQ(res->data.string, "inkaur", "safe access content mismatch");
-    free_json_item(j);
-}
-
-void test_json_nested() {
-    char *json_str = "{\"a\": {\"b\": [1, 2, 3]}}";
-    struct json *j = json_parse(json_str);
-    ASSERT(j != NULL, "nested parse failed");
-    struct json *b = json_access(j, "a", "b", NULL);
-    ASSERT(b != NULL && b->type == json_array, "failed to access nested array");
-    ASSERT(json_get_array_number(b, 1) == 2, "nested value mismatch");
-    free_json_item(j);
-}
-
-void test_json_read_file() {
-    // Test with a temporary file
-    system("echo '{\"test\": 123}' > /tmp/test.json");
-    char *content = json_read_file("/tmp/test.json");
-    ASSERT(content != NULL, "json_read_file failed");
-    struct json *j = json_parse(content);
-    ASSERT(json_get_dict_number(j, "test") == 123, "file content parse mismatch");
-    free(content);
-    free_json_item(j);
-}
-
-void test_json_parse_negative_number() {
-    char *json_str = "-123.45";
-    int idx;
-    struct json *j = json_parse_number(json_str, &idx);
-    
-    ASSERT(j != NULL, "json_parse_number failed for negative");
-    ASSERT(j->type == json_number, "type should be number");
-    ASSERT(j->data.number == -123.45, "negative number value mismatch");
-    
-    free_json_item(j);
-
-    struct json *j2 = json_parse("{\"val\": -42}");
-    ASSERT(j2 != NULL, "json_parse failed for negative in dict");
-    ASSERT(json_get_dict_number(j2, "val") == -42, "negative number value mismatch in dict");
-    free_json_item(j2);
-}
-
-void test_hashmap_resizing() {
-    HashMap *map = new_hashmap(4); // Start small
-    for (int i = 0; i < 20; i++) {
-        char key[16];
-        sprintf(key, "key%d", i);
-        int *val = safe_malloc(sizeof(int));
-        *val = i;
-        hashmap_set(map, new_item(safe_strdup(key), val, free, free));
+    /* embedded NUL in input */
+    {
+        char err[64];
+        const char nul[] = "{\"a\":\"b\0c\"}";
+        ASSERT(json_parse(nul, sizeof nul - 1, err, sizeof err) == NULL, "NUL byte in input");
     }
 
-    ASSERT(map->stored == 20, "hashmap should have 20 items");
-    /* It should have doubled: 4 -> 8 -> 16 -> 32 */
-    ASSERT(map->can_store == 32, "hashmap should have resized to exactly 32");
-
-    for (int i = 0; i < 20; i++) {
-        char key[16];
-        sprintf(key, "key%d", i);
-        int *val = hashmap_index(map, key);
-        ASSERT(val != NULL, "item should be found after resize");
-        ASSERT(*val == i, "item value mismatch after resize");
+    /* deterministic fuzz: must never crash (ASan/UBSan would abort) */
+    uint32_t seed = 12345;
+    const char alphabet[] = "{}[],:\"\\u0123456789abcdefnulltruefalse-+.eE \t\n";
+    char buf[257];
+    for (int iter = 0; iter < 20000; iter++) {
+        size_t len = (size_t)(iter % 256);
+        for (size_t i = 0; i < len; i++) {
+            seed = seed * 1103515245u + 12345u;
+            buf[i] = alphabet[(seed >> 16) % (sizeof alphabet - 1)];
+        }
+        buf[len] = '\0';
+        char err[64];
+        json_free(json_parse(buf, len, err, sizeof err));
     }
-
-    free_hashmap(map);
-}
-
-void run_json_tests() {
-    test_json_parse_string();
-    test_json_parse_number();
-    test_json_parse_negative_number();
-    test_json_parse_array();
-    test_json_parse_dict();
-    test_json_parse_bool_null();
-    test_hashmap_resizing();
-    test_json_safe_access();
-    test_json_nested();
-    test_json_read_file();
-    printf("Unit tests for JSON passed!\n");
+    ASSERT(1, "fuzz loop survived");
+    printf("json: ok\n");
 }
