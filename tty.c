@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
 #include <unistd.h>
 
 bool use_color(void)
@@ -16,6 +17,12 @@ bool use_color(void)
 bool stdin_is_tty(void)
 {
     return isatty(STDIN_FILENO) != 0;
+}
+
+void discard_typeahead(void)
+{
+    if (isatty(STDIN_FILENO))
+        tcflush(STDIN_FILENO, TCIFLUSH);
 }
 
 bool read_line(char *buf, size_t sz)

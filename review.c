@@ -193,11 +193,13 @@ Decision ask_decision(const char *pkgbase, const char *what, Severity max,
         if (can_view)
             printf("   [v] show the review again\n");
         printf("   [x] abort everything\n");
-        printf("%schoice:%s ", C_BLUE, C_END);
-
+        discard_typeahead();
         char buf[64];
-        if (!read_line(buf, sizeof buf))
-            return DEC_ABORT;
+        do {   /* bare ENTER just asks again */
+            printf("%schoice:%s ", C_BLUE, C_END);
+            if (!read_line(buf, sizeof buf))
+                return DEC_ABORT;
+        } while (buf[0] == '\0');
         char c = buf[0];
         if (buf[0] != '\0' && buf[1] != '\0')
             c = '?';   /* only single-letter answers */
@@ -210,7 +212,8 @@ Decision ask_decision(const char *pkgbase, const char *what, Severity max,
                    "(anything else goes back):%s ", C_RED, pkgbase, severity_name(max), C_END);
             if (read_line(buf, sizeof buf) && strcmp(buf, "yes") == 0)
                 return DEC_APPROVE;
-            break;
+            printf("   approval not confirmed\n");
+            continue;
         case 's': case 'S':
             return DEC_SKIP;
         case 'r': case 'R':

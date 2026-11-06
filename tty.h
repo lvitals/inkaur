@@ -17,6 +17,10 @@ bool ask_yesno(const char *prompt, bool default_yes, bool noconfirm);
  */
 bool ask_approval(const char *prompt);
 
+/* Drop keys typed before a prompt was shown (e.g. extra ENTERs in the pager),
+ * so they cannot answer a security question by accident. */
+void discard_typeahead(void);
+
 /* Read one line from stdin (trailing newline stripped). */
 bool read_line(char *buf, size_t sz);
 

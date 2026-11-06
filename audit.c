@@ -110,58 +110,65 @@ typedef struct {
     const char *re;
     const char *msg;
     int path_ref;   /* only names a path: informational inside data files */
+    int redirect;   /* needs a real write/redirection: void on display-only lines */
 } Rule;
 
 static const Rule rules[] = {
     /* remote code execution / reverse shells */
     { SEV_CRIT, "(curl|wget|fetch|aria2c)[^|;&]*\\|[[:space:]]*(sudo[[:space:]]+)?(ba|z|da|k|fi)?sh([^[:alnum:]_.-]|$)",
-      "download piped straight into a shell", 0 },
+      "download piped straight into a shell", 0, 0 },
     { SEV_CRIT, "base64[[:space:]]+(-d|--decode)[^|]*\\|[[:space:]]*(ba|z|da)?sh([^[:alnum:]_.-]|$)",
-      "base64 payload piped into a shell", 0 },
-    { SEV_CRIT, "/dev/(tcp|udp)/", "bash network socket /dev/tcp (reverse shell pattern)", 0 },
+      "base64 payload piped into a shell", 0, 0 },
+    { SEV_CRIT, "/dev/(tcp|udp)/", "bash network socket /dev/tcp (reverse shell pattern)", 0, 0 },
     { SEV_CRIT, "(^|[^[:alnum:]])(nc|ncat|netcat)[[:space:]]+.*-[[:alpha:]]*e[[:space:]]",
-      "netcat -e (reverse shell)", 0 },
-    { SEV_CRIT, "(ba)?sh[[:space:]]+-i[[:space:]]*>&", "interactive shell redirected to a socket", 0 },
-    { SEV_CRIT, "authorized_keys", "touches SSH authorized_keys", 1 },
-    { SEV_CRIT, "/etc/(sudoers|shadow|gshadow|ld\\.so\\.preload)", "references a critical system file", 1 },
+      "netcat -e (reverse shell)", 0, 0 },
+    { SEV_CRIT, "(ba)?sh[[:space:]]+-i[[:space:]]*>&", "interactive shell redirected to a socket", 0, 0 },
+    { SEV_CRIT, "authorized_keys", "touches SSH authorized_keys", 1, 0 },
+    { SEV_CRIT, "/etc/(sudoers|shadow|gshadow|ld\\.so\\.preload)", "references a critical system file", 1, 0 },
     { SEV_CRIT, "rm[[:space:]]+-[[:alpha:]]*[rR][[:alpha:]]*[[:space:]]+(--no-preserve-root[[:space:]]+)?(/|~|\\$HOME|\\$\\{HOME\\})([[:space:]]|/?\\*|$)",
-      "recursive delete of / or $HOME", 0 },
-    { SEV_HIGH, "(mkfifo|socat)[[:space:]]", "named pipe / socat (reverse shell building block)", 0 },
+      "recursive delete of / or $HOME", 0, 0 },
+    { SEV_HIGH, "(mkfifo|socat)[[:space:]]", "named pipe / socat (reverse shell building block)", 0, 0 },
 
     /* obfuscation */
-    { SEV_HIGH, "base64[[:space:]]+(-d|--decode)", "base64 decoding (possible obfuscation)", 0 },
-    { SEV_HIGH, "xxd[[:space:]]+-r|openssl[[:space:]]+(enc|base64)[[:space:]].*-d", "hex/openssl decoding (possible obfuscation)", 0 },
-    { SEV_WARN, "(\\\\x[0-9a-fA-F]{2}){4,}", "hex-escaped byte string (possible obfuscation)", 0 },
-    { SEV_HIGH, "(^|[;&|[:space:]({])eval([[:space:]]|$)", "eval executes dynamically built code", 0 },
+    { SEV_HIGH, "base64[[:space:]]+(-d|--decode)", "base64 decoding (possible obfuscation)", 0, 0 },
+    { SEV_HIGH, "xxd[[:space:]]+-r|openssl[[:space:]]+(enc|base64)[[:space:]].*-d", "hex/openssl decoding (possible obfuscation)", 0, 0 },
+    { SEV_WARN, "(\\\\x[0-9a-fA-F]{2}){4,}", "hex-escaped byte string (possible obfuscation)", 0, 0 },
+    { SEV_HIGH, "(^|[;&|[:space:]({])eval([[:space:]]|$)", "eval executes dynamically built code", 0, 0 },
     { SEV_HIGH, "(python[0-9.]*|perl|ruby|php|node)[[:space:]]+-[ce][[:space:]]",
-      "inline interpreter code", 0 },
+      "inline interpreter code", 0, 0 },
 
     /* privilege / persistence */
-    { SEV_HIGH, "(^|[^[:alnum:]_.-])sudo([[:space:]]|$)", "sudo inside a build/install script", 0 },
+    { SEV_HIGH, "(^|[^[:alnum:]_.-])sudo([[:space:]]|$)", "sudo inside a build/install script", 0, 0 },
     { SEV_HIGH, "systemctl[[:space:]]+(--[a-z-]+[[:space:]]+)*(enable|start|restart|mask|daemon-reload)",
-      "enables/starts systemd units", 0 },
-    { SEV_HIGH, "chmod[[:space:]].*(777|666|[oa]\\+[rwx]*w)", "world-writable permissions", 0 },
+      "enables/starts systemd units", 0, 0 },
+    { SEV_HIGH, "chmod[[:space:]].*(777|666|[oa]\\+[rwx]*w)", "world-writable permissions", 0, 0 },
     { SEV_HIGH, "chmod[[:space:]](.*[[:space:]])?([ugoa]*\\+[rwxX]*s|[2467][0-7]{3})([[:space:],]|$)",
-      "setuid/setgid bit", 0 },
-    { SEV_HIGH, "(^|[^[:alnum:]_])(setcap|chattr)[[:space:]]", "file capabilities / immutable attribute", 0 },
-    { SEV_HIGH, "crontab|/etc/cron|/var/spool/cron", "cron persistence", 1 },
+      "setuid/setgid bit", 0, 0 },
+    { SEV_HIGH, "(^|[^[:alnum:]_.-])install[[:space:]](.*[[:space:]])?(-[[:alpha:]]*m[[:space:]]*|--mode=)[0-7]?[2467][0-7]{3}([[:space:]]|$)",
+      "setuid/setgid bit", 0, 0 },
+    { SEV_HIGH, "(^|[^[:alnum:]_])(setcap|chattr)[[:space:]]", "file capabilities / immutable attribute", 0, 0 },
+    { SEV_HIGH, "crontab|/etc/cron|/var/spool/cron", "cron persistence", 1, 0 },
     { SEV_HIGH, "\\.bashrc|\\.bash_profile|\\.zshrc|\\.zprofile|/etc/profile\\.d|/etc/environment",
-      "shell startup file (persistence)", 1 },
-    { SEV_HIGH, "xdg/autostart|\\.config/autostart", "desktop autostart (persistence)", 1 },
-    { SEV_HIGH, "LD_PRELOAD|LD_LIBRARY_PATH=", "dynamic loader injection", 1 },
-    { SEV_HIGH, "(^|[^[:alnum:]_])(insmod|modprobe|rmmod)[[:space:]]", "kernel module loading", 0 },
-    { SEV_HIGH, "(^|[^[:alnum:]_])(useradd|usermod|groupadd|chpasswd)[[:space:]]", "account manipulation", 0 },
-    { SEV_HIGH, "(/home/[[:alnum:]_]|/root/|\\$HOME|\\$\\{HOME\\}|~/)", "references a home directory", 1 },
+      "shell startup file (persistence)", 1, 0 },
+    { SEV_HIGH, "xdg/autostart|\\.config/autostart", "desktop autostart (persistence)", 1, 0 },
+    { SEV_HIGH, "LD_PRELOAD|LD_LIBRARY_PATH=", "dynamic loader injection", 1, 0 },
+    { SEV_HIGH, "(^|[^[:alnum:]_.-])(insmod|modprobe|rmmod)([[:space:]]|$)", "kernel module loading", 0, 0 },
+    { SEV_HIGH, "(^|[^[:alnum:]_])(useradd|usermod|groupadd|chpasswd)[[:space:]]", "account manipulation", 0, 0 },
+    /* merely naming ~/.config (launchers, hints) is normal; writing there is not */
+    { SEV_HIGH, "(>>?[[:space:]]*|(^|[^[:alnum:]_.-])(tee|cp|mv|install|ln|rsync)[[:space:]].*)[\"']?(/home/[[:alnum:]_]|/root/|\\$HOME|\\$\\{HOME\\}|~/)",
+      "writes into a home directory", 0, 1 },
+    { SEV_WARN, "(/home/[[:alnum:]_]|/root/|\\$HOME|\\$\\{HOME\\}|~/)", "references a home directory", 1, 0 },
     { SEV_HIGH, "https?://(bit\\.ly|tinyurl\\.com|goo\\.gl|t\\.co|is\\.gd|cutt\\.ly|rb\\.gy|pastebin\\.com|paste\\.ee|hastebin|transfer\\.sh|0x0\\.st|[a-z0-9-]+\\.ngrok|discord(app)?\\.com/api/webhooks|webhook\\.site)",
-      "URL shortener / paste site / webhook", 0 },
-    { SEV_HIGH, "(//|@)([0-9]{1,3}\\.){3}[0-9]{1,3}([:/]|$)", "URL pointing to a raw IP address", 0 },
+      "URL shortener / paste site / webhook", 0, 0 },
+    { SEV_HIGH, "(//|@)([0-9]{1,3}\\.){3}[0-9]{1,3}([:/]|$)", "URL pointing to a raw IP address", 0, 0 },
 
     /* network during build (bypasses source=() + checksums) */
-    { SEV_WARN, "(^|[^[:alnum:]_-])(curl|wget|aria2c)[[:space:]]", "downloads during build (not covered by checksums)", 0 },
+    { SEV_WARN, "(^|[^[:alnum:]_-])(curl|wget|aria2c)[[:space:]]", "downloads during build (not covered by checksums)", 0, 0 },
     { SEV_WARN, "git[[:space:]]+clone|pip[0-9]*[[:space:]]+install|npm[[:space:]]+install|go[[:space:]]+get",
-      "fetches code during build outside source=()", 0 },
-    { SEV_WARN, "(^|[^[:alnum:]_])(nohup|disown|setsid)([[:space:]]|$)", "detaches a background process", 0 },
-    { SEV_WARN, "(^|[^[:alnum:]_])(iptables|nft|ufw)[[:space:]]", "firewall changes", 0 },
+      "fetches code during build outside source=()", 0, 0 },
+    { SEV_WARN, "(^|[^[:alnum:]_])(nohup|disown|setsid)([[:space:]]|$)", "detaches a background process", 0, 0 },
+    { SEV_WARN, "(^|[^[:alnum:]_])(iptables|nft|ufw)[[:space:]]", "firewall changes", 0, 0 },
+    { SEV_WARN, "(^|[,[:space:]])RUN(\\{[a-z]+\\})?\\+?=[[:space:]]*\"", "udev rule runs a program as root on device events", 0, 0 },
 };
 
 #define NRULES (sizeof rules / sizeof rules[0])
@@ -257,6 +264,32 @@ static const char *skip_blank(const char *s)
     return s;
 }
 
+/* Shell metacharacters outside quotes (or substitutions inside "..."). An
+ * unterminated quote counts as code: the string may continue elsewhere. */
+static bool has_shell_meta(const char *s)
+{
+    for (; *s; s++) {
+        if (*s == '\\') {
+            if (*++s == '\0')
+                return true;
+        } else if (*s == '\'') {
+            s = strchr(s + 1, '\'');
+            if (!s)
+                return true;
+        } else if (*s == '"') {
+            for (s++; *s != '"'; s++) {
+                if (*s == '\0' || *s == '`' || (s[0] == '$' && s[1] == '('))
+                    return true;
+                if (*s == '\\' && s[1] != '\0')
+                    s++;
+            }
+        } else if (strchr("|>;&`", *s) || (s[0] == '$' && s[1] == '(')) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Line that only displays text: echo/printf/msg without any pipe,
  * redirection, command substitution or command chaining. */
 static bool display_only(const char *line)
@@ -266,7 +299,7 @@ static bool display_only(const char *line)
         strncmp(s, "msg ", 4) != 0 && strncmp(s, "msg2 ", 5) != 0 &&
         strncmp(s, "warning ", 8) != 0)
         return false;
-    return strpbrk(s, "|>;&`") == NULL && strstr(s, "$(") == NULL;
+    return !has_shell_meta(s);
 }
 
 /* Detects "<<WORD" / "<<-WORD" / "<<'WORD'". Returns true and fills delim. */
@@ -333,6 +366,9 @@ void audit_scan_text(Report *r, const char *name, const char *text, size_t len)
             char *line = xstrndup(body, bn > 4096 ? 4096 : bn);
             Severity cap = SEV_CRIT;
             bool ends_doc = false;
+            /* "# ..." comment (shell, udev, conf): not executed */
+            bool text_line = false;
+            bool comment = !in_doc && kind != K_PATCH && *skip_blank(line) == '#';
             if (kind == K_PATCH)
                 cap = SEV_WARN;
             if (shell && in_doc) {
@@ -352,13 +388,22 @@ void audit_scan_text(Report *r, const char *name, const char *text, size_t len)
                     in_doc = true;
                     doc_text = is_text;
                 }
-                if (display_only(line))
+                if (display_only(line)) {
                     cap = SEV_WARN;
+                    text_line = true;
+                }
             }
             for (size_t i = 0; i < NRULES && budget > 0; i++) {
                 if (!rx_ok[i] || regexec(&rx[i], line, 0, NULL, 0) != 0)
                     continue;
+                if (rules[i].redirect && text_line)
+                    continue;   /* the ">" is inside quoted text */
                 Severity s = rules[i].sev;
+                if (comment) {
+                    if (s < SEV_CRIT)
+                        continue;
+                    s = SEV_WARN;   /* still worth a look: may be uncommented later */
+                }
                 if (kind == K_DATA && rules[i].path_ref)
                     s = SEV_INFO;
                 if (s > cap)
