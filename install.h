@@ -20,6 +20,11 @@ typedef struct {
     const StrList *xact;   /* pacman transaction/upgrade modifiers */
     const StrList *ignore; /* --ignore values */
     StrList *touched;      /* names this run (re)installed, for the change summary */
+    int fetch_jobs;        /* concurrent git clone/fetch (1 = serial) */
+    int build_jobs;        /* concurrent AUR builds (1 = serial) */
+    bool prefetch;         /* fetch AUR repos while pacman -Syu runs */
+    StrList *fetched;      /* bases already fetched during this run */
+    const char *perf_note; /* why these values were chosen, for display */
 } Options;
 
 int cmd_sync(const StrList *targets, const Options *o);

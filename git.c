@@ -36,7 +36,7 @@ static const char *const git_env[] = {
     NULL
 };
 
-int git_run(const char *cwd, const char *const args[], StrBuf *capture)
+static const char **git_argv(const char *const args[])
 {
     size_t na = 0, nc = 0;
     while (args[na])
@@ -51,7 +51,12 @@ int git_run(const char *cwd, const char *const args[], StrBuf *capture)
     for (size_t i = 0; i < na; i++)
         argv[k++] = args[i];
     argv[k] = NULL;
+    return argv;
+}
 
+int git_run(const char *cwd, const char *const args[], StrBuf *capture)
+{
+    const char **argv = git_argv(args);
     ProcOpts o;
     memset(&o, 0, sizeof o);
     o.cwd = cwd;
@@ -61,6 +66,18 @@ int git_run(const char *cwd, const char *const args[], StrBuf *capture)
     int rc = proc_run(argv, &o);
     free(argv);
     return rc;
+}
+
+static pid_t git_spawn(const char *cwd, const char *const args[])
+{
+    const char **argv = git_argv(args);
+    ProcOpts o;
+    memset(&o, 0, sizeof o);
+    o.cwd = cwd;
+    o.extra_env = git_env;
+    pid_t pid = proc_spawn(argv, &o, -1);
+    free(argv);
+    return pid;
 }
 
 int git_clone(const char *url, const char *dest)
@@ -75,6 +92,20 @@ int git_fetch(const char *dir)
     const char *a[] = { "fetch", "--quiet", "--no-recurse-submodules",
                         "--prune", "origin", NULL };
     return git_run(dir, a, NULL);
+}
+
+pid_t git_spawn_clone(const char *url, const char *dest)
+{
+    const char *a[] = { "clone", "--quiet", "--no-recurse-submodules",
+                        "--origin", "origin", "--", url, dest, NULL };
+    return git_spawn(NULL, a);
+}
+
+pid_t git_spawn_fetch(const char *dir)
+{
+    const char *a[] = { "fetch", "--quiet", "--no-recurse-submodules",
+                        "--prune", "origin", NULL };
+    return git_spawn(dir, a);
 }
 
 int git_rev(const char *dir, const char *rev, char *out, size_t outsz)

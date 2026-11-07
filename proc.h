@@ -4,6 +4,7 @@
 #include "buf.h"
 
 #include <stdbool.h>
+#include <sys/types.h>
 
 /*
  * Child process execution without a shell.
@@ -30,6 +31,21 @@ void proc_set_identity(const char *home, const char *user);
 
 /* Returns the exit status, 128+signal if killed, -1 if it could not run. */
 int proc_run(const char *const argv[], const ProcOpts *opts);
+
+/*
+ * Start a child without waiting for it (same checks and environment as
+ * proc_run). stdin is /dev/null; stdout and stderr go to log_fd, or to
+ * /dev/null when log_fd < 0. opts->capture is not supported here.
+ * Returns the pid, or -1.
+ */
+pid_t proc_spawn(const char *const argv[], const ProcOpts *opts, int log_fd);
+
+/* Wait for any child started with proc_spawn. Returns its pid and stores
+ * the exit status (128+signal if killed) in *rc; -1 when none are left. */
+pid_t proc_wait_any(int *rc);
+
+/* Number of online CPUs (at least 1). */
+long cpu_count(void);
 
 /* true if path is a root-owned, non group/other-writable regular file. */
 bool tool_is_trusted(const char *path);

@@ -5,6 +5,7 @@
 #include "fsutil.h"
 #include "install.h"
 #include "pacman.h"
+#include "perf.h"
 #include "proc.h"
 #include "search.h"
 #include "tty.h"
@@ -35,6 +36,7 @@ static void usage_main(void)
          "    inkaur {-T --deptest}  [options] [package(s)]\n"
          "    inkaur {-U --upgrade}  [options] <file(s)>\n"
          "    inkaur {-A --audit}    <directory>          (inkaur only)\n"
+         "    inkaur --speedtest                          (inkaur only)\n"
          "\nevery pacman operation and option is accepted with the same letters and\n"
          "names. inkaur handles the AUR side and passes the rest to pacman unchanged.\n"
          "\nuse 'inkaur {-h --help}' with an operation for available options");
@@ -103,6 +105,16 @@ static void usage_sync(void)
          "      --repo           only the repositories (plain pacman)\n"
          "      --chroot <dir>   build in a clean devtools chroot (<dir>/root,\n"
          "                       create with: mkarchroot <dir>/root base-devel)\n"
+         "parallelism (inkaur; defaults in ~/.config/inkaur/inkaur.conf):\n"
+         "      --jobs <n|auto>  AUR packages built at the same time; a package starts\n"
+         "                       only after its AUR dependencies are installed\n"
+         "      --fetch-jobs <n|auto>\n"
+         "                       AUR git repositories cloned/fetched at the same time\n"
+         "      --serial         one thing at a time (slow or metered connections,\n"
+         "                       slow computers)\n"
+         "      --parallel       force parallel mode even if the config says no\n"
+         "                       'auto' accelerates by default and scales with CPUs,\n"
+         "                       free RAM and the speed saved by 'inkaur --speedtest'\n"
          "  targets may be prefixed with a repository ('extra/pkg') or 'aur/'");
     usage_common(true, true);
     puts("\nsecurity: every AUR package (and every AUR dependency) is audited and\n"
@@ -186,6 +198,21 @@ static void usage_deptest(void)
     puts("usage:  inkaur {-T --deptest} [options] [package(s)]\n"
          "options:");
     usage_common(false, false);
+}
+
+static void usage_speedtest(void)
+{
+    puts("usage:  inkaur --speedtest\n"
+         "measures the AUR latency and the download speed of your first pacman\n"
+         "mirror, shows CPUs/RAM and pacman's ParallelDownloads, and prints the\n"
+         "fetch/build jobs inkaur will use. The result is saved for 'auto' (7 days).\n"
+         "\nconfiguration (/etc/inkaur.conf, then ~/.config/inkaur/inkaur.conf):\n"
+         "    [options]\n"
+         "    Parallel  = auto      # auto | yes | no\n"
+         "    BuildJobs = auto      # auto | 1..64\n"
+         "    FetchJobs = auto      # auto | 1..64\n"
+         "    Prefetch  = auto      # fetch AUR repos while pacman -Syu runs\n"
+         "    SpeedTest = auto      # auto (use saved result) | always | never");
 }
 
 static void usage_audit(void)
@@ -401,7 +428,7 @@ static int op_info(const Cli *c)
     return rc;
 }
 
-static int op_sync(const Cli *c, Options *o, const char *home)
+static int op_sync(const Cli *c, Options *o, const char *home, const PerfConfig *pc)
 {
     if (cli_has(c, "print") || cli_has(c, "downloadonly")) {
         if (c->aur_only) {
@@ -471,6 +498,24 @@ static int op_sync(const Cli *c, Options *o, const char *home)
         return 1;
     }
 
+    /* parallelism: config + command line, scaled to this machine/connection */
+    PerfFacts facts;
+    perf_facts(cache, &facts);
+    if (pc->speedtest == 2 && pc->parallel != 0 && upgrade && !c->repo_only) {
+        printf(":: Measuring the connection (SpeedTest = always)...\n");
+        if (perf_measure(c->config, &facts, true) == 0)
+            perf_save_speed(cache, &facts);
+    }
+    PerfPlan plan;
+    perf_decide(pc, &facts, o->chroot != NULL, &plan);
+    StrList fetched;
+    sl_init(&fetched);
+    o->fetch_jobs = plan.fetch_jobs;
+    o->build_jobs = plan.build_jobs;
+    o->prefetch = plan.prefetch;
+    o->fetched = &fetched;
+    o->perf_note = plan.why;
+
     int rc;
     if (cli_has(c, "clean")) {
         rc = cmd_clean(o, cli_count(c, "clean") > 1);
@@ -485,6 +530,9 @@ static int op_sync(const Cli *c, Options *o, const char *home)
         rc = cmd_sync(&c->targets, o);
     }
     close(lock);
+    sl_free(&fetched);
+    o->fetched = NULL;
+    o->perf_note = NULL;
     o->chroot = NULL;
     o->cache = NULL;
     return rc;
@@ -509,11 +557,11 @@ static bool is_transaction(const Cli *c)
     }
 }
 
-static int dispatch(const Cli *c, Options *o, const char *home)
+static int dispatch(const Cli *c, Options *o, const char *home, const PerfConfig *pc)
 {
     switch (c->op) {
     case 'S':
-        return op_sync(c, o, home);
+        return op_sync(c, o, home, pc);
     case 'Q':
         return op_query(c, o);
     case 'R':
@@ -590,6 +638,7 @@ int main(int argc, char **argv)
         case 'F': usage_files(); break;
         case 'T': usage_deptest(); break;
         case 'A': usage_audit(); break;
+        case 'N': usage_speedtest(); break;
         default: usage_main(); break;
         }
         if (c.op == 0 && !c.help) {
@@ -605,6 +654,30 @@ int main(int argc, char **argv)
         } else {
             rc = cmd_audit_dir(c.targets.v[0]);
         }
+        goto done;
+    }
+
+    PerfConfig pc;
+    perf_config_defaults(&pc);
+    perf_config_load_all(home, &pc);
+    if (c.parallel >= 0)
+        pc.parallel = c.parallel;
+    if (c.jobs || c.fetch_jobs) {
+        int bj = c.jobs ? perf_parse_jobs(c.jobs) : pc.build_jobs;
+        int fj = c.fetch_jobs ? perf_parse_jobs(c.fetch_jobs) : pc.fetch_jobs;
+        if (bj < 0 || fj < 0) {
+            fprintf(stderr, "error: --jobs/--fetch-jobs take 'auto' or 1..%d\n", PERF_MAX_JOBS);
+            rc = 1;
+            goto done;
+        }
+        pc.build_jobs = bj;
+        pc.fetch_jobs = fj;
+        if (c.parallel < 0 && ((c.jobs && bj != 1) || (c.fetch_jobs && fj != 1)))
+            pc.parallel = 1;   /* explicit job counts win over 'Parallel = no' */
+    }
+    if (c.op == 'N') {
+        char cache[PATH_BUF];
+        rc = setup_cache(home, cache, sizeof cache) == 0 ? cmd_speedtest(cache, c.config, &pc) : 1;
         goto done;
     }
 
@@ -631,7 +704,7 @@ int main(int argc, char **argv)
     sl_init(&before);
     bool summary = is_transaction(&c) && pacman_snapshot(&before) == 0;
 
-    rc = dispatch(&c, &o, home);
+    rc = dispatch(&c, &o, home, &pc);
 
     if (summary && pacman_ran_as_root()) {
         StrList after;

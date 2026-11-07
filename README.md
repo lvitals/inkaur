@@ -76,6 +76,63 @@ Installed (1)
    total: 2 upgraded, 1 installed, 0 reinstalled, 0 downgraded, 0 removed
 ```
 
+### Parallel updates
+
+Like dnf, inkaur runs independent work at the same time, and the dependency
+order still holds:
+
+* **Fetch.** AUR git repositories are cloned/fetched several at a time: the
+  targets first, then each wave of AUR dependencies.
+* **Overlap.** During `-Syu`, the AUR updates are looked up and their
+  repositories fetched in the background while `pacman -Syu` downloads and
+  waits at its prompt. Nothing from that background step is trusted: the main
+  process checks everything again afterwards.
+* **Build.** Up to *BuildJobs* AUR packages are built at once. A package starts
+  only after every AUR package it depends on has been built, audited and
+  installed. Repository dependencies of the builds are installed first in one
+  `pacman -S --asdeps --needed`. Builds run without a terminal and write to
+  `~/.cache/inkaur/.logs/<pkgbase>.log` (the last lines are shown on failure).
+  Everything interactive stays one at a time: reviews, PGP key confirmation,
+  HIGH-finding decisions and `pacman -U`. `--chroot` builds always run one at
+  a time.
+
+The defaults (`auto`) speed things up. They scale down on fewer than 4 CPUs,
+less than 3 GiB of free RAM, or a slow connection:
+
+| measured speed | fetch jobs | prefetch during -Syu |
+|---|---|---|
+| not measured | 4 | yes |
+| < 128 KiB/s | 1 | no |
+| < 1 MiB/s | 2 | no |
+| < 4 MiB/s | 4 | yes |
+| faster | 8 | yes |
+
+Build jobs: 1 below 4 CPUs, otherwise max(2, CPUs/4), capped by free RAM/3 GiB
+and at 4.
+
+```bash
+inkaur --speedtest       # AUR latency, mirror throughput, CPUs, RAM, pacman
+                         # ParallelDownloads, and the values inkaur will use
+inkaur -Syu --serial     # one thing at a time (slow/metered link, slow computer)
+inkaur -Syu --jobs 4 --fetch-jobs 8
+```
+
+`--speedtest` saves its result for 7 days, and `auto` uses it. Settings go in
+`/etc/inkaur.conf` and then `~/.config/inkaur/inkaur.conf` (the latter
+overrides; files must not be group/world-writable):
+
+```ini
+[options]
+Parallel  = auto     # auto | yes | no
+BuildJobs = auto     # auto | 1..64
+FetchJobs = auto     # auto | 1..64
+Prefetch  = auto     # auto | yes | no
+SpeedTest = auto     # auto (use the saved result) | always (measure before -Su) | never
+```
+
+Repository downloads stay with pacman: set `ParallelDownloads` in
+`/etc/pacman.conf`. `--speedtest` suggests a value.
+
 ## Security model
 
 ### What happens on `-S`

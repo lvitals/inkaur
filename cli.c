@@ -93,13 +93,17 @@ static const OptDef OPTS[] = {
     { "aur", 0, OP_S | OP_Q, false, K_LOCAL, false },
     { "repo", 0, OP_S | OP_Q, false, K_LOCAL, false },
     { "chroot", 0, OP_S, true, K_LOCAL, false },
+    { "jobs", 0, OP_S, true, K_LOCAL, false },
+    { "fetch-jobs", 0, OP_S, true, K_LOCAL, false },
+    { "serial", 0, OP_S, false, K_LOCAL, false },
+    { "parallel", 0, OP_S, false, K_LOCAL, false },
 };
 #define NOPTS (sizeof OPTS / sizeof OPTS[0])
 
 static const struct { char op; const char *name; } OPS[] = {
     { 'D', "database" }, { 'F', "files" }, { 'Q', "query" }, { 'R', "remove" },
     { 'S', "sync" }, { 'T', "deptest" }, { 'U', "upgrade" }, { 'V', "version" },
-    { 'A', "audit" },
+    { 'A', "audit" }, { 'N', "speedtest" },
 };
 #define NOPS (sizeof OPS / sizeof OPS[0])
 
@@ -137,6 +141,7 @@ void cli_init(Cli *c)
     sl_init(&c->targets);
     sl_init(&c->ignore);
     c->color = -1;
+    c->parallel = -1;
 }
 
 void cli_free(Cli *c)
@@ -249,6 +254,10 @@ static void apply(Cli *c, const OptDef *d, const char *val)
     else if (strcmp(d->lng, "aur") == 0) c->aur_only = true;
     else if (strcmp(d->lng, "repo") == 0) c->repo_only = true;
     else if (strcmp(d->lng, "chroot") == 0) c->chroot = val;
+    else if (strcmp(d->lng, "jobs") == 0) c->jobs = val;
+    else if (strcmp(d->lng, "fetch-jobs") == 0) c->fetch_jobs = val;
+    else if (strcmp(d->lng, "serial") == 0) c->parallel = 0;
+    else if (strcmp(d->lng, "parallel") == 0) c->parallel = 1;
     else if (strcmp(d->lng, "config") == 0) c->config = val;
     else if (strcmp(d->lng, "ignore") == 0) split_ignore(c, val);
     else if (strcmp(d->lng, "color") == 0)
@@ -312,7 +321,7 @@ int cli_parse(Cli *c, int argc, char **argv, char *err, size_t errsz)
     if (find_op(c, argc, argv, err, errsz) != 0)
         return -1;
     unsigned opbit = op_bit(c->op);
-    if (c->op == 0 || c->op == 'V')
+    if (c->op == 0 || c->op == 'V' || c->op == 'N')
         opbit = OP_PAC | OP_A;   /* accept anything; only help/version are used */
 
     bool end_opts = false;

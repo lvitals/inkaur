@@ -243,3 +243,78 @@ int proc_run(const char *const argv[], const ProcOpts *opts)
         return 128 + WTERMSIG(status);
     return -1;
 }
+
+static int decode_status(int status)
+{
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))
+        return 128 + WTERMSIG(status);
+    return -1;
+}
+
+pid_t proc_spawn(const char *const argv[], const ProcOpts *opts, int log_fd)
+{
+    static const ProcOpts defaults;
+    if (opts == NULL)
+        opts = &defaults;
+    if (argv == NULL || argv[0] == NULL || !tool_is_trusted(argv[0])) {
+        fprintf(stderr, "error: refusing to run untrusted or missing executable '%s'\n",
+                (argv && argv[0]) ? argv[0] : "(null)");
+        return -1;
+    }
+    char **env = build_env(opts->extra_env);
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        free_env(env);
+        return -1;
+    }
+    if (pid == 0) {
+        struct sigaction dfl;
+        memset(&dfl, 0, sizeof dfl);
+        dfl.sa_handler = SIG_DFL;
+        sigemptyset(&dfl.sa_mask);
+        sigaction(SIGINT, &dfl, NULL);
+        sigaction(SIGQUIT, &dfl, NULL);
+        sigaction(SIGPIPE, &dfl, NULL);
+        if (redirect_null(STDIN_FILENO, O_RDONLY) != 0)
+            _exit(126);
+        if (log_fd >= 0) {
+            if (dup2(log_fd, STDOUT_FILENO) < 0 || dup2(log_fd, STDERR_FILENO) < 0)
+                _exit(126);
+        } else if (redirect_null(STDOUT_FILENO, O_WRONLY) != 0 ||
+                   redirect_null(STDERR_FILENO, O_WRONLY) != 0) {
+            _exit(126);
+        }
+        if (opts->cwd && chdir(opts->cwd) != 0)
+            _exit(126);
+        child_close_fds();
+        execve(argv[0], (char *const *)argv, env);
+        _exit(127);
+    }
+    free_env(env);
+    return pid;
+}
+
+pid_t proc_wait_any(int *rc)
+{
+    int status = 0;
+    pid_t w;
+    do {
+        w = waitpid(-1, &status, 0);
+    } while (w < 0 && errno == EINTR);
+    if (w > 0 && rc)
+        *rc = decode_status(status);
+    return w;
+}
+
+long cpu_count(void)
+{
+    long n = -1;
+#ifdef _SC_NPROCESSORS_ONLN
+    n = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    return n > 0 ? n : 1;
+}

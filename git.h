@@ -3,6 +3,8 @@
 
 #include "buf.h"
 
+#include <sys/types.h>
+
 /*
  * git invoked with a fully controlled configuration:
  *  - system and global config ignored (GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL=/dev/null)
@@ -13,6 +15,9 @@
 int git_run(const char *cwd, const char *const args[], StrBuf *capture);
 
 int git_clone(const char *url, const char *dest);
+/* Background clone (dir NULL) or fetch of dir; output discarded. Returns pid or -1. */
+pid_t git_spawn_clone(const char *url, const char *dest);
+pid_t git_spawn_fetch(const char *dir);
 int git_fetch(const char *dir);
 /* Commit id of rev into out (41/65 bytes buffer). */
 int git_rev(const char *dir, const char *rev, char *out, size_t outsz);

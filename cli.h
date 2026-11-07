@@ -15,12 +15,13 @@
  * flags ("-Syu", "-b/path"). Options are re-emitted in canonical long form
  * ("--dbpath=/path") so values can never be read as options by pacman.
  *
- * inkaur-only additions: the -A/--audit operation and, for -S/-Q,
- * --aur, --repo and --chroot <dir>.
+ * inkaur-only additions: the -A/--audit and --speedtest operations and, for
+ * -S/-Q, --aur, --repo, --chroot <dir>, --jobs, --fetch-jobs, --serial and
+ * --parallel.
  */
 
 typedef struct {
-    char op;               /* D F Q R S T U V A, or 0 */
+    char op;               /* D F Q R S T U V A, N (--speedtest), or 0 */
     bool help;
     StrList seen;          /* long name of every option given (repeats kept) */
     StrList common;        /* forwarded: options valid for every operation */
@@ -33,6 +34,9 @@ typedef struct {
     const char *chroot;    /* --chroot value, or NULL */
     bool noconfirm, needed, asdeps, asexplicit, aur_only, repo_only;
     int color;             /* -1 auto, 0 never, 1 always */
+    const char *jobs;      /* --jobs value (build jobs), or NULL */
+    const char *fetch_jobs;/* --fetch-jobs value, or NULL */
+    int parallel;          /* --parallel 1, --serial 0, unset -1 */
 } Cli;
 
 void cli_init(Cli *c);

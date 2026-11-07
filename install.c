@@ -5,6 +5,7 @@
 #include "fsutil.h"
 #include "git.h"
 #include "pacman.h"
+#include "perf.h"
 #include "proc.h"
 #include "review.h"
 #include "rpc.h"
@@ -14,6 +15,11 @@
 #include "vercmp.h"
 
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +43,10 @@ typedef struct {
     char dir[PATH_BUF];
     SrcInfo si;
     StrList built;         /* package files to install */
+    bool running;          /* parallel build in progress */
+    pid_t pid;
+    time_t started;
+    char log[PATH_BUF];
 } Node;
 
 typedef struct {
@@ -44,6 +54,7 @@ typedef struct {
     size_t n, cap;
     StrList visited;       /* dependency names already handled */
     StrList in_progress;   /* bases being resolved (cycle guard) */
+    StrList dep_ok;        /* dependency strings already satisfied or in the repos */
     const Options *o;
     char arch[80];
 } Plan;
@@ -65,6 +76,7 @@ static void plan_free(Plan *p)
     free(p->v);
     sl_free(&p->visited);
     sl_free(&p->in_progress);
+    sl_free(&p->dep_ok);
 }
 
 static Node *plan_find_base(Plan *p, const char *base)
@@ -77,6 +89,102 @@ static Node *plan_find_base(Plan *p, const char *base)
 
 /* ------------------------------------------------------------ repo */
 
+static bool repo_reusable(const char *dir, const char *url)
+{
+    char gitdir[PATH_BUF];
+    if (!path_join(gitdir, sizeof gitdir, dir, ".git") || !is_dir_nofollow(dir) ||
+        !is_dir_nofollow(gitdir))
+        return false;
+    StrBuf origin;
+    sb_init(&origin, 4096);
+    bool reuse = git_origin_url(dir, &origin) == 0 && strcmp(origin.data, url) == 0;
+    sb_free(&origin);
+    return reuse;
+}
+
+/*
+ * Clone/fetch several AUR repositories at once (FetchJobs at a time).
+ * Successful ones are recorded in o->fetched so prepare_repo() does not hit
+ * the network again; failures are simply retried there, serially, with the
+ * error visible.
+ */
+static void prefetch_bases(const Options *o, const StrList *bases, bool quiet)
+{
+    if (o->fetch_jobs <= 1 || o->fetched == NULL || o->cache == NULL)
+        return;
+    StrList todo;
+    sl_init(&todo);
+    for (size_t i = 0; i < bases->n; i++)
+        if (valid_pkgname(bases->v[i]) && !sl_contains(o->fetched, bases->v[i]))
+            sl_push_unique(&todo, bases->v[i]);
+    if (todo.n < 2) {
+        sl_free(&todo);
+        return;
+    }
+    size_t jobs = (size_t)o->fetch_jobs;
+    if (!quiet)
+        printf(":: Fetching %zu AUR repositories (%zu at a time)...\n", todo.n,
+               jobs < todo.n ? jobs : todo.n);
+    struct { pid_t pid; size_t idx; } run[PERF_MAX_JOBS];
+    size_t nrun = 0, next = 0, ok = 0;
+    while (next < todo.n || nrun) {
+        while (nrun < jobs && next < todo.n) {
+            size_t i = next++;
+            char dir[PATH_BUF], url[PATH_BUF];
+            if (!path_join(dir, sizeof dir, o->cache, todo.v[i]))
+                continue;
+            snprintf(url, sizeof url, AUR_GIT_FMT, todo.v[i]);
+            pid_t pid;
+            if (repo_reusable(dir, url))
+                pid = git_spawn_fetch(dir);
+            else
+                pid = rmtree(dir) == 0 ? git_spawn_clone(url, dir) : -1;
+            if (pid > 0) {
+                run[nrun].pid = pid;
+                run[nrun].idx = i;
+                nrun++;
+            }
+        }
+        if (nrun == 0)
+            break;
+        int rc = -1;
+        pid_t w = proc_wait_any(&rc);
+        if (w < 0)
+            break;
+        for (size_t k = 0; k < nrun; k++) {
+            if (run[k].pid != w)
+                continue;
+            if (rc == 0) {
+                sl_push(o->fetched, todo.v[run[k].idx]);
+                ok++;
+            }
+            run[k] = run[--nrun];
+            break;
+        }
+    }
+    if (!quiet)
+        printf("   %zu/%zu fetched\n", ok, todo.n);
+    sl_free(&todo);
+}
+
+/* AUR bases of the given exact package names (one RPC request per batch). */
+static void bases_of(const StrList *names, StrList *bases)
+{
+    for (size_t off = 0; off < names->n; off += RPC_BATCH) {
+        StrList batch;
+        sl_init(&batch);
+        for (size_t i = off; i < names->n && i < off + RPC_BATCH; i++)
+            sl_push(&batch, names->v[i]);
+        RpcResult res;
+        if (rpc_info(&batch, &res) == 0) {
+            for (size_t i = 0; i < res.n; i++)
+                sl_push_unique(bases, res.pkgs[i].base);
+            rpc_result_free(&res);
+        }
+        sl_free(&batch);
+    }
+}
+
 static int prepare_repo(const Options *o, Node *n)
 {
     if (!path_join(n->dir, sizeof n->dir, o->cache, n->base))
@@ -84,17 +192,10 @@ static int prepare_repo(const Options *o, Node *n)
     char url[PATH_BUF];
     snprintf(url, sizeof url, AUR_GIT_FMT, n->base);
 
-    char gitdir[PATH_BUF];
-    bool reuse = false;
-    if (path_join(gitdir, sizeof gitdir, n->dir, ".git") && is_dir_nofollow(n->dir) &&
-        is_dir_nofollow(gitdir)) {
-        StrBuf origin;
-        sb_init(&origin, 4096);
-        reuse = git_origin_url(n->dir, &origin) == 0 && strcmp(origin.data, url) == 0;
-        sb_free(&origin);
-    }
-
-    if (reuse) {
+    bool reuse = repo_reusable(n->dir, url);
+    if (reuse && o->fetched && sl_contains(o->fetched, n->base)) {
+        /* already fetched in parallel during this run */
+    } else if (reuse) {
         printf("   fetching %s\n", n->base);
         if (git_fetch(n->dir) != 0) {
             fprintf(stderr, "error: git fetch failed for %s\n", n->base);
@@ -143,6 +244,35 @@ static int resolve(Plan *p, const char *depstr, bool explicit, int depth);
 static int resolve_node_deps(Plan *p, Node *n, int depth)
 {
     static const char *const keys[] = { "depends", "makedepends", "checkdepends", NULL };
+    if (p->o->fetch_jobs > 1) {
+        /* fetch this node's AUR dependencies all at once before descending */
+        StrList cand;
+        sl_init(&cand);
+        for (size_t k = 0; keys[k]; k++) {
+            StrList deps;
+            sl_init(&deps);
+            srcinfo_values(&n->si, keys[k], p->arch, &deps);
+            for (size_t i = 0; i < deps.n; i++) {
+                char nm[MAX_NAME_LEN + 1];
+                if (!valid_depstring(deps.v[i], nm, sizeof nm) || sl_contains(&p->visited, nm) ||
+                    sl_contains(&p->dep_ok, deps.v[i]))
+                    continue;
+                if (pacman_dep_satisfied(deps.v[i]) || pacman_dep_in_repos(deps.v[i]))
+                    sl_push(&p->dep_ok, deps.v[i]);
+                else
+                    sl_push_unique(&cand, nm);
+            }
+            sl_free(&deps);
+        }
+        if (cand.n > 1) {
+            StrList bases;
+            sl_init(&bases);
+            bases_of(&cand, &bases);
+            prefetch_bases(p->o, &bases, false);
+            sl_free(&bases);
+        }
+        sl_free(&cand);
+    }
     for (size_t k = 0; keys[k]; k++) {
         StrList deps;
         sl_init(&deps);
@@ -210,6 +340,8 @@ static int resolve(Plan *p, const char *depstr, bool explicit, int depth)
         return 0;
 
     if (!explicit) {
+        if (sl_contains(&p->dep_ok, depstr))
+            return 0;
         if (pacman_dep_satisfied(depstr))
             return 0;
         if (pacman_dep_in_repos(depstr))
@@ -439,51 +571,22 @@ static char *pkgname_from_file(const char *path)
 
 enum { BUILD_OK = 0, BUILD_FAIL = -1, BUILD_SKIP = 1, BUILD_REMOVE = 2, BUILD_ABORT = 3 };
 
-static int build_node(Plan *p, Node *n)
+/* Checks that need the terminal: exact commit, PGP keys, .SRCINFO consistency. */
+static int build_prepare(Node *n)
 {
-    const Options *o = p->o;
-    printf("\n%s:: Building %s @ %.12s%s\n", C_BOLD, n->base, n->commit, C_END);
-
     if (git_checkout_exact(n->dir, n->commit) != 0) {
         fprintf(stderr, "error: %s: worktree does not match the reviewed commit\n", n->base);
         return -1;
     }
     if (check_pgp_keys(n) != 0 || check_srcinfo_consistency(n) != 0)
         return -1;
+    return 0;
+}
 
-    int rc;
-    if (o->chroot) {
-        size_t cap = 8 + 2 * 64;
-        const char **argv = xcalloc(cap, sizeof(char *));
-        size_t k = 0;
-        argv[k++] = BIN_MAKECHROOTPKG;
-        argv[k++] = "-c";
-        argv[k++] = "-r";
-        argv[k++] = o->chroot;
-        for (size_t i = 0; i < p->n && &p->v[i] != n; i++)
-            for (size_t j = 0; j < p->v[i].built.n && k + 3 < cap; j++) {
-                argv[k++] = "-I";
-                argv[k++] = p->v[i].built.v[j];
-            }
-        argv[k] = NULL;
-        ProcOpts po;
-        memset(&po, 0, sizeof po);
-        po.cwd = n->dir;
-        rc = proc_run(argv, &po);
-        free(argv);
-    } else {
-        const char *argv[] = { BIN_MAKEPKG, "--syncdeps", "--cleanbuild", "--clean",
-                               o->noconfirm ? "--noconfirm" : NULL, NULL };
-        ProcOpts po;
-        memset(&po, 0, sizeof po);
-        po.cwd = n->dir;
-        rc = proc_run(argv, &po);
-    }
-    if (rc != 0) {
-        fprintf(stderr, "error: build of %s failed (exit %d)\n", n->base, rc);
-        return -1;
-    }
-
+/* After a successful build: find the package files and audit them. */
+static int build_collect(Plan *p, Node *n)
+{
+    (void)p;
     StrBuf list;
     sb_init(&list, 1u << 20);
     const char *pl[] = { BIN_MAKEPKG, "--packagelist", NULL };
@@ -533,6 +636,48 @@ static int build_node(Plan *p, Node *n)
     case DEC_ABORT:   return BUILD_ABORT;
     default:          return BUILD_FAIL;
     }
+}
+
+static int build_node(Plan *p, Node *n)
+{
+    const Options *o = p->o;
+    printf("\n%s:: Building %s @ %.12s%s\n", C_BOLD, n->base, n->commit, C_END);
+    if (build_prepare(n) != 0)
+        return -1;
+
+    int rc;
+    if (o->chroot) {
+        size_t cap = 8 + 2 * 64;
+        const char **argv = xcalloc(cap, sizeof(char *));
+        size_t k = 0;
+        argv[k++] = BIN_MAKECHROOTPKG;
+        argv[k++] = "-c";
+        argv[k++] = "-r";
+        argv[k++] = o->chroot;
+        for (size_t i = 0; i < p->n && &p->v[i] != n; i++)
+            for (size_t j = 0; j < p->v[i].built.n && k + 3 < cap; j++) {
+                argv[k++] = "-I";
+                argv[k++] = p->v[i].built.v[j];
+            }
+        argv[k] = NULL;
+        ProcOpts po;
+        memset(&po, 0, sizeof po);
+        po.cwd = n->dir;
+        rc = proc_run(argv, &po);
+        free(argv);
+    } else {
+        const char *argv[] = { BIN_MAKEPKG, "--syncdeps", "--cleanbuild", "--clean",
+                               o->noconfirm ? "--noconfirm" : NULL, NULL };
+        ProcOpts po;
+        memset(&po, 0, sizeof po);
+        po.cwd = n->dir;
+        rc = proc_run(argv, &po);
+    }
+    if (rc != 0) {
+        fprintf(stderr, "error: build of %s failed (exit %d)\n", n->base, rc);
+        return -1;
+    }
+    return build_collect(p, n);
 }
 
 static int install_node(const Options *o, const Node *n)
@@ -679,6 +824,241 @@ static int print_summary(const Plan *p, bool aborted)
     return (failed || aborted) ? 1 : 0;
 }
 
+/* ------------------------------------------------------------ parallel builds */
+
+static void print_log_tail(const char *path, size_t lines)
+{
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0)
+        return;
+    struct stat st;
+    char buf[16384];
+    ssize_t r = 0;
+    if (fstat(fd, &st) == 0) {
+        off_t from = st.st_size > (off_t)sizeof buf - 1 ? st.st_size - (off_t)sizeof buf + 1 : 0;
+        if (lseek(fd, from, SEEK_SET) >= 0)
+            r = read(fd, buf, sizeof buf - 1);
+    }
+    close(fd);
+    if (r <= 0)
+        return;
+    size_t n = (size_t)r, seen = 0, start = 0;
+    for (size_t i = n; i > 0; i--)
+        if (buf[i - 1] == '\n' && i != n && ++seen == lines) {
+            start = i;
+            break;
+        }
+    StrBuf out;
+    sb_init(&out, sizeof buf * 8);
+    sanitize_append(&out, buf + start, n - start, true);
+    fputs(out.data, stderr);
+    if (out.len && out.data[out.len - 1] != '\n')
+        fputc('\n', stderr);
+    sb_free(&out);
+}
+
+/* Every plan node that a needs is finished (installed, or left out). */
+static bool node_ready(const Plan *p, size_t a)
+{
+    for (size_t b = 0; b < p->n; b++)
+        if (b != a && p->v[b].state == ST_PENDING && node_needs(p, &p->v[a], &p->v[b]))
+            return false;
+    return true;
+}
+
+static bool provided_by_plan(const Plan *p, const char *name)
+{
+    for (size_t i = 0; i < p->n; i++)
+        if (sl_contains(&p->v[i].want, name) || sl_contains(&p->v[i].aliases, name))
+            return true;
+    return false;
+}
+
+/* makepkg --syncdeps cannot run concurrently (pacman lock, prompts), so the
+ * repository dependencies of all pending builds are installed up front. */
+static int install_repo_deps(Plan *p)
+{
+    static const char *const keys[] = { "depends", "makedepends", "checkdepends", NULL };
+    StrList need;
+    sl_init(&need);
+    for (size_t i = 0; i < p->n; i++) {
+        if (p->v[i].state != ST_PENDING)
+            continue;
+        for (size_t k = 0; keys[k]; k++) {
+            StrList deps;
+            sl_init(&deps);
+            srcinfo_values(&p->v[i].si, keys[k], p->arch, &deps);
+            for (size_t j = 0; j < deps.n; j++) {
+                char nm[MAX_NAME_LEN + 1];
+                if (valid_depstring(deps.v[j], nm, sizeof nm) && !provided_by_plan(p, nm) &&
+                    !sl_contains(&need, deps.v[j]) && !pacman_dep_satisfied(deps.v[j]))
+                    sl_push(&need, deps.v[j]);
+            }
+            sl_free(&deps);
+        }
+    }
+    int rc = 0;
+    if (need.n) {
+        printf("\n%s:: Installing %zu repository dependencies for the parallel builds%s\n",
+               C_BOLD, need.n, C_END);
+        StrList args;
+        sl_init(&args);
+        sl_push(&args, "--sync");
+        sl_push(&args, "--asdeps");
+        sl_push(&args, "--needed");
+        sl_extend(&args, p->o->common);
+        rc = pacman_run(true, &args, &need) == 0 ? 0 : -1;
+        sl_free(&args);
+    }
+    sl_free(&need);
+    return rc;
+}
+
+static pid_t spawn_build(const Plan *p, Node *n)
+{
+    char logdir[PATH_BUF];
+    if (!path_join(logdir, sizeof logdir, p->o->cache, ".logs") || ensure_private_dir(logdir) != 0)
+        return -1;
+    char fname[MAX_NAME_LEN + 8];
+    snprintf(fname, sizeof fname, "%s.log", n->base);
+    if (!path_join(n->log, sizeof n->log, logdir, fname))
+        return -1;
+    int fd = open(n->log, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd < 0)
+        return -1;
+    const char *argv[] = { BIN_MAKEPKG, "--cleanbuild", "--clean", "--noprogressbar",
+                           p->o->noconfirm ? "--noconfirm" : NULL, NULL };
+    ProcOpts po;
+    memset(&po, 0, sizeof po);
+    po.cwd = n->dir;
+    pid_t pid = proc_spawn(argv, &po, fd);
+    close(fd);
+    return pid;
+}
+
+static void stop_builds(Plan *p)
+{
+    for (size_t i = 0; i < p->n; i++)
+        if (p->v[i].running)
+            kill(p->v[i].pid, SIGTERM);
+    for (size_t i = 0; i < p->n; i++)
+        if (p->v[i].running) {
+            int st;
+            while (waitpid(p->v[i].pid, &st, 0) < 0 && errno == EINTR)
+                ;
+            p->v[i].running = false;
+        }
+}
+
+static void fmt_elapsed(char *buf, size_t sz, time_t secs)
+{
+    if (secs >= 60)
+        snprintf(buf, sz, "%ldm%02lds", (long)secs / 60, (long)secs % 60);
+    else
+        snprintf(buf, sz, "%lds", (long)secs);
+}
+
+/*
+ * Up to BuildJobs makepkg processes at once. A package starts only when every
+ * plan package it depends on is installed, so the dependency order is kept.
+ * Builds run without a terminal (output in ~/.cache/inkaur/.logs); everything
+ * interactive (key checks, audit decisions, pacman -U) stays in this process,
+ * one at a time. Returns 1 if the user aborted.
+ */
+static int run_parallel(Plan *p)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < p->n; i++) {
+        Node *n = &p->v[i];
+        if (n->state != ST_PENDING)
+            continue;
+        printf("\n%s:: Preparing %s @ %.12s%s\n", C_BOLD, n->base, n->commit, C_END);
+        if (build_prepare(n) != 0) {
+            mark(n, ST_FAILED, "pre-build checks failed");
+            drop_dependents(p, i);
+            continue;
+        }
+        total++;
+    }
+    if (total == 0)
+        return 0;
+    if (install_repo_deps(p) != 0) {
+        fprintf(stderr, "error: could not install the repository dependencies\n");
+        for (size_t i = 0; i < p->n; i++)
+            if (p->v[i].state == ST_PENDING)
+                mark(&p->v[i], ST_FAILED, "repository dependencies missing");
+        return 0;
+    }
+
+    size_t jobs = (size_t)p->o->build_jobs, nrun = 0, done = 0;
+    printf("\n%s:: Building %zu AUR packages, up to %zu at a time (dependency order kept)%s\n",
+           C_BOLD, total, jobs, C_END);
+    for (;;) {
+        for (size_t i = 0; i < p->n && nrun < jobs; i++) {
+            Node *n = &p->v[i];
+            if (n->state != ST_PENDING || n->running || !node_ready(p, i))
+                continue;
+            n->pid = spawn_build(p, n);
+            if (n->pid < 0) {
+                mark(n, ST_FAILED, "could not start makepkg");
+                drop_dependents(p, i);
+                continue;
+            }
+            n->running = true;
+            n->started = time(NULL);
+            nrun++;
+            printf("   %s->%s building %s  (log: %s)\n", C_BLUE, C_END, n->base, n->log);
+        }
+        if (nrun == 0)
+            break;
+
+        int rc = -1;
+        pid_t w = proc_wait_any(&rc);
+        if (w < 0)
+            break;
+        size_t i = p->n;
+        for (size_t k = 0; k < p->n; k++)
+            if (p->v[k].running && p->v[k].pid == w)
+                i = k;
+        if (i == p->n)
+            continue;
+        Node *n = &p->v[i];
+        n->running = false;
+        nrun--;
+        done++;
+        char el[32];
+        fmt_elapsed(el, sizeof el, time(NULL) - n->started);
+        if (rc != 0) {
+            printf("   %s[%zu/%zu] FAILED%s %s after %s (exit %d); last lines of the log:\n",
+                   C_RED, done, total, C_END, n->base, el, rc);
+            print_log_tail(n->log, 25);
+            mark(n, ST_FAILED, "build failed");
+            drop_dependents(p, i);
+            continue;
+        }
+        printf("   %s[%zu/%zu] built%s %s in %s\n", C_GREEN, done, total, C_END, n->base, el);
+        int r = build_collect(p, n);
+        if (r == BUILD_ABORT) {
+            stop_builds(p);
+            return 1;
+        }
+        if (r == BUILD_SKIP || r == BUILD_REMOVE) {
+            apply_leave_out(p, i, r == BUILD_REMOVE);
+            continue;
+        }
+        if (r != BUILD_OK || install_node(p->o, n) != 0) {
+            mark(n, ST_FAILED, r != BUILD_OK ? "build failed" : "pacman -U failed");
+            drop_dependents(p, i);
+            continue;
+        }
+        mark(n, ST_DONE, NULL);
+    }
+    for (size_t i = 0; i < p->n; i++)
+        if (p->v[i].state == ST_PENDING)
+            mark(&p->v[i], ST_FAILED, "could not be scheduled");
+    return 0;
+}
+
 static int run_plan(Plan *p)
 {
     if (p->n == 0) {
@@ -720,6 +1100,11 @@ static int run_plan(Plan *p)
     }
 
     /* Phase 2: build, audit the result, install. Dependencies come first. */
+    size_t pending = 0;
+    for (size_t i = 0; i < p->n; i++)
+        pending += p->v[i].state == ST_PENDING;
+    if (p->o->build_jobs > 1 && pending > 1 && p->o->chroot == NULL)
+        return print_summary(p, run_parallel(p) != 0);
     for (size_t i = 0; i < p->n; i++) {
         Node *n = &p->v[i];
         if (n->state != ST_PENDING)
@@ -746,6 +1131,7 @@ static void plan_init(Plan *p, const Options *o)
     memset(p, 0, sizeof *p);
     sl_init(&p->visited);
     sl_init(&p->in_progress);
+    sl_init(&p->dep_ok);
     p->o = o;
     struct utsname u;
     if (uname(&u) == 0 && valid_pkgname(u.machine))
@@ -758,6 +1144,14 @@ static int sync_aur(const StrList *aur, const Options *o)
 {
     Plan p;
     plan_init(&p, o);
+    if (o->perf_note)
+        printf(":: Parallel: %d fetch / %d build jobs (%s)\n", o->fetch_jobs, o->build_jobs,
+               o->perf_note);
+    StrList bases;
+    sl_init(&bases);
+    bases_of(aur, &bases);
+    prefetch_bases(o, &bases, false);
+    sl_free(&bases);
     printf(":: Resolving AUR dependencies...\n");
     int rc = 0;
     for (size_t i = 0; i < aur->n && rc == 0; i++)
@@ -853,7 +1247,7 @@ static bool is_ignored(const Options *o, const StrList *conf_ignore, const char 
 
 /* Foreign packages with a newer AUR version. Prints them unless quiet
  * (then only names). Returns 0, or -1 if the AUR could not be queried. */
-static int find_aur_updates(const Options *o, StrList *upd, bool quiet)
+static int find_aur_updates(const Options *o, StrList *upd, StrList *bases, bool quiet)
 {
     StrList names, vers, conf_ignore;
     sl_init(&names);
@@ -893,6 +1287,8 @@ static int find_aur_updates(const Options *o, StrList *upd, bool quiet)
                     printf("   %s%-30s%s %s%s%s -> %s%s%s\n", C_BOLD, a->name, C_END,
                            C_RED, vers.v[i], C_END, C_GREEN, a->version, C_END);
                 sl_push(upd, a->name);
+                if (bases)
+                    sl_push_unique(bases, a->base);
             }
             rpc_result_free(&res);
         }
@@ -908,14 +1304,45 @@ int cmd_aur_updates(const Options *o, bool quiet)
 {
     StrList upd;
     sl_init(&upd);
-    int rc = find_aur_updates(o, &upd, quiet);
+    int rc = find_aur_updates(o, &upd, NULL, quiet);
     int n = rc == 0 ? (int)upd.n : -1;
     sl_free(&upd);
     return n;
 }
 
+/*
+ * While pacman -Syu runs (and waits at its prompt), a forked copy of inkaur
+ * looks up the AUR updates and fetches their repositories in the background,
+ * with no terminal output. Git data lands in the cache; the main process
+ * re-checks everything afterwards, so nothing it finds is trusted blindly.
+ */
+static pid_t start_background_prefetch(const Options *o)
+{
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid != 0)
+        return pid;
+    int fd = open("/dev/null", O_RDWR);
+    if (fd >= 0) {
+        dup2(fd, STDIN_FILENO);
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        if (fd > 2)
+            close(fd);
+    }
+    StrList upd, bases;
+    sl_init(&upd);
+    sl_init(&bases);
+    if (find_aur_updates(o, &upd, &bases, true) == 0)
+        prefetch_bases(o, &bases, true);
+    _exit(0);
+}
+
 int cmd_upgrade(const Options *o)
 {
+    pid_t bg = -1;
+    if (!o->aur_only && !o->repo_only && o->prefetch && o->fetch_jobs > 1)
+        bg = start_background_prefetch(o);
     if (!o->aur_only) {
         StrList args;
         sl_init(&args);
@@ -934,15 +1361,33 @@ int cmd_upgrade(const Options *o)
             printf(":: Upgrading repository packages...\n");
         int r = pacman_run(true, &args, NULL);
         sl_free(&args);
+        if (bg > 0) {
+            int st;
+            if (waitpid(bg, &st, WNOHANG) == 0) {
+                if (r == 0)
+                    printf(":: Waiting for the AUR prefetch to finish...\n");
+                else
+                    kill(bg, SIGTERM);
+                while (waitpid(bg, &st, 0) < 0 && errno == EINTR)
+                    ;
+            }
+        }
         if (r != 0)
             return 1;
     }
     if (o->repo_only)
         return 0;
 
-    StrList upd;
+    if (o->perf_note)
+        printf(":: Parallel: %d fetch / %d build jobs (%s)\n", o->fetch_jobs, o->build_jobs,
+               o->perf_note);
+    StrList upd, bases;
     sl_init(&upd);
-    int rc = find_aur_updates(o, &upd, false) == 0 ? 0 : 1;
+    sl_init(&bases);
+    int rc = find_aur_updates(o, &upd, &bases, false) == 0 ? 0 : 1;
+    if (rc == 0)
+        prefetch_bases(o, &bases, false);
+    sl_free(&bases);
 
     if (rc == 0 && upd.n == 0)
         printf(" there is nothing to do\n");

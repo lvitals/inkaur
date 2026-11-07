@@ -58,6 +58,14 @@ void run_cli_tests(void)
            strstr(out, "invalid package name"), "repo/ prefix validated");
     ASSERT(run("./inkaur -D --asdeps ../x 2>&1", out, sizeof out) == 1, "-D bad name rejected");
     ASSERT(run("./inkaur -T 'a;b' 2>&1", out, sizeof out) == 1, "-T bad dep rejected");
+    ASSERT(run("./inkaur -S --jobs 0 x 2>&1", out, sizeof out) == 1 &&
+           strstr(out, "--jobs"), "--jobs 0 refused");
+    ASSERT(run("./inkaur -S --fetch-jobs=lots x 2>&1", out, sizeof out) == 1, "bad --fetch-jobs");
+    ASSERT(run("./inkaur -Q --jobs 2 2>&1", out, sizeof out) == 1, "--jobs only for -S");
+    ASSERT(run("./inkaur --speedtest -h", out, sizeof out) == 0 && strstr(out, "BuildJobs"),
+           "--speedtest help");
+    ASSERT(run("./inkaur -Sh", out, sizeof out) == 0 && strstr(out, "--serial") &&
+           strstr(out, "--fetch-jobs"), "-Sh documents parallelism");
     ASSERT(run("./inkaur -S ../.. 2>&1", out, sizeof out) == 1 &&
            strstr(out, "Summary of changes") == NULL, "no summary when nothing ran");
 

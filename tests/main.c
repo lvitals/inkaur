@@ -11,6 +11,7 @@ void run_audit_tests(void);
 void run_audit_calibration_tests(void);
 void run_tty_tests(void);
 void run_cli_parse_tests(void);
+void run_perf_tests(void);
 void run_cli_tests(void);
 
 int main(void)
@@ -25,6 +26,7 @@ int main(void)
     run_audit_calibration_tests();
     run_tty_tests();
     run_cli_parse_tests();
+    run_perf_tests();
     printf("\n--- functional ---\n");
     run_cli_tests();
     printf("\nall %d assertions passed\n", tests_run);
