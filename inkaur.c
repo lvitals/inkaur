@@ -4,6 +4,7 @@
 #include "config.h"
 #include "fsutil.h"
 #include "install.h"
+#include "mascot.h"
 #include "pacman.h"
 #include "mirrors.h"
 #include "perf.h"
@@ -244,9 +245,20 @@ static void usage_audit(void)
 
 static void version(void)
 {
-    printf("inkaur %s\n", INKAUR_VERSION);
-    puts("Copyright (C) 2026 Leandro V. Catarin\n"
-         "built without third-party libraries (C99 + POSIX libc only)");
+    char title[64];
+    snprintf(title, sizeof title, "%sinkaur %s%s", C_BOLD, INKAUR_VERSION, C_END);
+    const char *const lines[] = {
+        title,
+        "Security-first AUR helper and pacman front-end",
+        "- every AUR package is audited and reviewed at an",
+        "  exact commit before anything is built",
+        "- every pacman option; summary of changes after updates",
+        "- parallel fetches and builds in dependency order",
+        "- mirror ranking (--rankmirrors), speed test (--speedtest)",
+        "Copyright (C) 2026 Leandro V. Catarin - MIT License",
+        "built without third-party libraries (C99 + POSIX libc only)",
+    };
+    mascot_print(lines, sizeof lines / sizeof lines[0]);
 }
 
 /* ------------------------------------------------------------ helpers */

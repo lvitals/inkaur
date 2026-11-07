@@ -25,6 +25,10 @@ void run_cli_tests(void)
 
     ASSERT(run("./inkaur -V", out, sizeof out) == 0, "-V exit 0");
     ASSERT(strstr(out, "inkaur 0.3.0") && strstr(out, "Leandro V. Catarin"), "version text");
+    ASSERT(strchr(out, '\033') == NULL, "-V piped: plain text, no mascot escapes");
+    ASSERT(run("./inkaur -V --color always", out, sizeof out) == 0 &&
+           strstr(out, "\xe2\x96\x80") && strstr(out, "inkaur 0.3.0"),
+           "-V --color always draws the mascot");
 
     ASSERT(run("./inkaur -h", out, sizeof out) == 0 && strstr(out, "usage:  inkaur"), "-h");
     ASSERT(run("./inkaur -Sh", out, sizeof out) == 0 && strstr(out, "--chroot"), "-Sh");
