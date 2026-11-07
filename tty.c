@@ -6,9 +6,15 @@
 #include <termios.h>
 #include <unistd.h>
 
+static int cached = -1;
+
+void tty_set_color(int mode)
+{
+    cached = mode;
+}
+
 bool use_color(void)
 {
-    static int cached = -1;
     if (cached < 0)
         cached = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
     return cached != 0;

@@ -24,7 +24,7 @@ void run_cli_tests(void)
     static char out[1 << 16];
 
     ASSERT(run("./inkaur -V", out, sizeof out) == 0, "-V exit 0");
-    ASSERT(strstr(out, "inkaur 0.2.0") && strstr(out, "Leandro V. Catarin"), "version text");
+    ASSERT(strstr(out, "inkaur 0.3.0") && strstr(out, "Leandro V. Catarin"), "version text");
 
     ASSERT(run("./inkaur -h", out, sizeof out) == 0 && strstr(out, "usage:  inkaur"), "-h");
     ASSERT(run("./inkaur -Sh", out, sizeof out) == 0 && strstr(out, "--chroot"), "-Sh");
@@ -43,6 +43,23 @@ void run_cli_tests(void)
     ASSERT(run("./inkaur -Ssi foo 2>&1", out, sizeof out) == 1, "conflicting ops refused");
     ASSERT(run("./inkaur -Qx 2>&1", out, sizeof out) == 1, "unknown query flag refused");
     ASSERT(run("./inkaur --bogus 2>&1", out, sizeof out) == 1, "unknown long option");
+    ASSERT(run("./inkaur -SQ 2>&1", out, sizeof out) == 1 && strstr(out, "one operation"),
+           "two operations refused");
+    ASSERT(run("./inkaur 2>&1", out, sizeof out) == 1 && strstr(out, "no operation"),
+           "no operation");
+    ASSERT(run("./inkaur -Rh", out, sizeof out) == 0 && strstr(out, "--cascade") &&
+           strstr(out, "--dbpath"), "-Rh lists pacman options");
+    ASSERT(run("./inkaur -Qh", out, sizeof out) == 0 && strstr(out, "--foreign"), "-Qh");
+    ASSERT(run("./inkaur -Uh", out, sizeof out) == 0 && strstr(out, "--overwrite"), "-Uh");
+    ASSERT(run("./inkaur -Dh", out, sizeof out) == 0 && strstr(out, "--asdeps"), "-Dh");
+    ASSERT(run("./inkaur -Fh", out, sizeof out) == 0 && strstr(out, "--regex"), "-Fh");
+    ASSERT(run("./inkaur -S --aur --repo x 2>&1", out, sizeof out) == 1, "--aur --repo refused");
+    ASSERT(run("./inkaur -S extra/../x 2>&1", out, sizeof out) == 1 &&
+           strstr(out, "invalid package name"), "repo/ prefix validated");
+    ASSERT(run("./inkaur -D --asdeps ../x 2>&1", out, sizeof out) == 1, "-D bad name rejected");
+    ASSERT(run("./inkaur -T 'a;b' 2>&1", out, sizeof out) == 1, "-T bad dep rejected");
+    ASSERT(run("./inkaur -S ../.. 2>&1", out, sizeof out) == 1 &&
+           strstr(out, "Summary of changes") == NULL, "no summary when nothing ran");
 
     char cmd[1024];
     const char *evil = make_fixture(1);

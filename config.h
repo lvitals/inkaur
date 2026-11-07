@@ -10,7 +10,7 @@
  * (or similar) cannot hijack a build.
  */
 
-#define INKAUR_VERSION "0.2.0"
+#define INKAUR_VERSION "0.3.0"
 
 #define AUR_RPC_BASE "https://aur.archlinux.org/rpc/v5"
 #define AUR_GIT_FMT  "https://aur.archlinux.org/%s.git"
@@ -18,6 +18,7 @@
 #define BIN_GIT            "/usr/bin/git"
 #define BIN_CURL           "/usr/bin/curl"
 #define BIN_PACMAN         "/usr/bin/pacman"
+#define BIN_PACMAN_CONF    "/usr/bin/pacman-conf"
 #define BIN_MAKEPKG        "/usr/bin/makepkg"
 #define BIN_MAKECHROOTPKG  "/usr/bin/makechrootpkg"
 #define BIN_GPG            "/usr/bin/gpg"

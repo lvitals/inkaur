@@ -27,18 +27,53 @@ sudo make install
 
 ## Usage
 
+inkaur accepts **every pacman operation and option**, with the same letters,
+long names (and unique prefixes such as `--sysu`), `--opt=value` / `--opt value`
+forms and stacked flags (`-Syu`, `-Rns`, `-b/path`). It does the AUR side itself
+and hands everything else to pacman unchanged, so `inkaur` can replace `pacman`
+on the command line. Options are re-emitted in canonical long form
+(`--dbpath=/path`) after validation, and targets always follow `--`.
+
 ```bash
+inkaur -Syu              # pacman -Syu, then AUR upgrades (honors --ignore and IgnorePkg)
+inkaur -Su --aur         # AUR upgrades only        (-Su --repo: repositories only)
 inkaur -S pkg            # install (repo targets go to pacman, the rest to the AUR)
-inkaur -S aur/pkg        # force the AUR
-inkaur -S --chroot ~/chroot pkg   # build in a clean devtools chroot
-inkaur -Ss words...      # search
-inkaur -Si pkg...        # info
-inkaur -Syu              # pacman -Syu, then AUR upgrades
-inkaur -Su               # AUR upgrades only
+inkaur -S extra/pkg aur/other   # force the repository or the AUR
+inkaur -S --chroot ~/chroot pkg # build in a clean devtools chroot
+inkaur -Ss words...      # search the repositories and the AUR (-Ssq: names only)
+inkaur -Si pkg...        # info from the repositories or the AUR
+inkaur -Qu               # pending updates, repositories and AUR
+inkaur -Q --aur          # foreign packages (same as -Qm; --repo = -Qn)
+inkaur -Sc / -Scc        # pacman cache cleanup + AUR build files / all clones
 inkaur -A <dir>          # static audit of a local PKGBUILD dir (exit 0..3 = severity)
-inkaur -Q[d|e|t|q]       # foreign packages (pacman -Qm)
-inkaur -R[n|s|c|u] pkg   # remove (pacman -R)
-inkaur -Sc / -Scc        # clean build files / remove all clones and review history
+inkaur -Qi / -Ql / -Qo / -R / -U / -D / -F / -T ...   # passed to pacman as is
+```
+
+Transaction options are forwarded to every pacman call they apply to,
+including the `pacman -U` of built AUR packages: `--asdeps`, `--asexplicit`,
+`--needed`, `--overwrite`, `--ignore`, `--nodeps`, `--assume-installed`,
+`--noscriptlet`, `--dbonly`, `--noprogressbar`, and the global ones
+(`--config`, `--root`, `--dbpath`, `--sysroot`, `--arch`, `--cachedir`,
+`--hookdir`, `--gpgdir`, `--logfile`, `--color`, `--debug`, `--verbose`,
+`--noconfirm`, `--confirm`, ...). `sudo`/`doas` is used only for the pacman
+calls that need root.
+
+Differences from pacman, on purpose: `-Sy` without `-u` is refused (partial
+upgrade), and `--noconfirm` never skips an inkaur security review.
+
+### Summary of changes
+
+After every transaction (`-S`, `-Su`, `-Syu`, `-R`, `-U`) inkaur compares the
+installed packages before and after and prints what changed:
+
+```
+:: Summary of changes
+Upgraded (2)
+   harfbuzz  14.0.0-1 -> 15.1.0-1
+   nss       3.132-1 -> 3.133-1
+Installed (1)
+   yay-bin   13.1.0-1
+   total: 2 upgraded, 1 installed, 0 reinstalled, 0 downgraded, 0 removed
 ```
 
 ## Security model

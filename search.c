@@ -72,7 +72,7 @@ static int cmp_hit(const void *a, const void *b)
     return strcmp(y->p->name, x->p->name);
 }
 
-int cmd_search(const StrList *terms)
+int cmd_search(const StrList *terms, bool quiet)
 {
     if (terms->n == 0) {
         fprintf(stderr, "error: no targets specified\n");
@@ -109,6 +109,10 @@ int cmd_search(const StrList *terms)
 
     for (size_t i = 0; i < nh; i++) {
         const AurPkg *p = hits[i].p;
+        if (quiet) {
+            printf("%s\n", p->name);
+            continue;
+        }
         printf("%saur/%s", C_BLUE, C_END);
         printf("%s%s%s %s%s%s", C_BOLD, p->name, C_END, C_GREEN, p->version, C_END);
         if (p->outofdate)

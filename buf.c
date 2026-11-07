@@ -114,6 +114,12 @@ bool sl_push_unique(StrList *l, const char *s)
     return true;
 }
 
+void sl_extend(StrList *l, const StrList *from)
+{
+    for (size_t i = 0; from && i < from->n; i++)
+        sl_push(l, from->v[i]);
+}
+
 static int cmp_str(const void *a, const void *b)
 {
     return strcmp(*(char *const *)a, *(char *const *)b);

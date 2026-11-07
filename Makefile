@@ -26,13 +26,14 @@ LDHARDEN = -pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,-z,separate-code 
 CFLAGS_ALL  = $(STD) $(WARN) $(HARDEN) $(EXTRA_CFLAGS)
 LDFLAGS_ALL = $(LDHARDEN) $(EXTRA_LDFLAGS)
 
-SRC  = alloc.c buf.c validate.c proc.c fsutil.c json.c net.c rpc.c srcinfo.c \
+SRC  = alloc.c buf.c cli.c validate.c proc.c fsutil.c json.c net.c rpc.c srcinfo.c \
        vercmp.c pacman.c git.c audit.c review.c tty.c install.c search.c
 OBJ  = $(SRC:.c=.o)
 
 TEST_SRC = tests/main.c tests/unit/test_validate.c tests/unit/test_json.c \
            tests/unit/test_vercmp.c tests/unit/test_srcinfo.c \
            tests/unit/test_audit.c tests/unit/test_buf.c \
+           tests/unit/test_cli.c \
            tests/functional/test_cli.c
 SAN      = -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined \
            -fno-sanitize-recover=all

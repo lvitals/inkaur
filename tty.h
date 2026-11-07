@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 bool use_color(void);          /* stdout is a tty and NO_COLOR unset */
+void tty_set_color(int mode);  /* -1 auto, 0 never, 1 always (--color) */
 bool stdin_is_tty(void);
 
 /* Generic question. With noconfirm returns default_yes without asking. */

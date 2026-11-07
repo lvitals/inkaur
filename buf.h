@@ -36,6 +36,7 @@ void sl_push(StrList *l, const char *s);            /* copies s */
 void sl_push_owned(StrList *l, char *s);            /* takes ownership */
 bool sl_contains(const StrList *l, const char *s);
 bool sl_push_unique(StrList *l, const char *s);     /* true if added */
+void sl_extend(StrList *l, const StrList *from);  /* copies every string */
 void sl_sort(StrList *l);
 bool sl_bsearch(const StrList *l, const char *s);   /* list must be sorted */
 void sl_free(StrList *l);

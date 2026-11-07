@@ -537,30 +537,22 @@ static int build_node(Plan *p, Node *n)
 
 static int install_node(const Options *o, const Node *n)
 {
-    const char *elev = privilege_elevator();
-    if (elev == NULL) {
-        fprintf(stderr, "error: sudo or doas (root-owned, setuid) is required to install\n");
-        return -1;
-    }
-    const char **argv = xcalloc(n->built.n + 8, sizeof(char *));
-    size_t k = 0;
-    argv[k++] = elev;
-    argv[k++] = BIN_PACMAN;
-    argv[k++] = "-U";
-    if (n->asdeps)
-        argv[k++] = "--asdeps";
-    if (o->noconfirm)
-        argv[k++] = "--noconfirm";
-    argv[k++] = "--";
-    for (size_t i = 0; i < n->built.n; i++)
-        argv[k++] = n->built.v[i];
-    argv[k] = NULL;
-    ProcOpts po;
-    memset(&po, 0, sizeof po);
-    int rc = proc_run(argv, &po);
-    free(argv);
-    if (rc == 0)
+    StrList args;
+    sl_init(&args);
+    sl_push(&args, "--upgrade");
+    sl_extend(&args, o->common);
+    sl_extend(&args, o->xact);
+    if (n->asdeps || o->asdeps)
+        sl_push(&args, "--asdeps");
+    else if (o->asexplicit)
+        sl_push(&args, "--asexplicit");
+    int rc = pacman_run(true, &args, &n->built);
+    sl_free(&args);
+    if (rc == 0) {
         syslog(LOG_AUTHPRIV | LOG_NOTICE, "installed pkgbase=%s commit=%s", n->base, n->commit);
+        for (size_t i = 0; o->touched && i < n->want.n; i++)
+            sl_push_unique(o->touched, n->want.v[i]);
+    }
     return rc == 0 ? 0 : -1;
 }
 
@@ -626,34 +618,23 @@ static bool node_is_installed(const Node *n)
 /* pacman -R the installed pkgnames of this base; pacman asks for confirmation. */
 static int remove_node(const Options *o, Node *n)
 {
-    const char *elev = privilege_elevator();
-    if (elev == NULL) {
-        fprintf(stderr, "error: sudo or doas is required\n");
-        return -1;
-    }
-    const char **argv = xcalloc(n->want.n + 8, sizeof(char *));
-    size_t k = 0;
-    argv[k++] = elev;
-    argv[k++] = BIN_PACMAN;
-    argv[k++] = "-R";
-    if (o->noconfirm)
-        argv[k++] = "--noconfirm";
-    argv[k++] = "--";
-    size_t first = k;
+    StrList args, names;
+    sl_init(&args);
+    sl_init(&names);
     for (size_t i = 0; i < n->want.n; i++) {
         char *v = pacman_installed_version(n->want.v[i]);
         if (v)
-            argv[k++] = n->want.v[i];
+            sl_push(&names, n->want.v[i]);
         free(v);
     }
-    argv[k] = NULL;
     int rc = 0;
-    if (k > first) {
-        ProcOpts po;
-        memset(&po, 0, sizeof po);
-        rc = proc_run(argv, &po) == 0 ? 0 : -1;
+    if (names.n) {
+        sl_push(&args, "--remove");
+        sl_extend(&args, o->common);
+        rc = pacman_run(true, &args, &names) == 0 ? 0 : -1;
     }
-    free(argv);
+    sl_free(&args);
+    sl_free(&names);
     if (rc == 0)
         syslog(LOG_AUTHPRIV | LOG_NOTICE, "removed pkgbase=%s by user decision", n->base);
     return rc;
@@ -681,7 +662,7 @@ static int print_summary(const Plan *p, bool aborted)
 {
     static const char *const names[] = { "not built", "skipped", "removed", "FAILED", "installed" };
     int failed = 0;
-    printf("\n%s:: Summary%s\n", C_BOLD, C_END);
+    printf("\n%s:: AUR build summary%s\n", C_BOLD, C_END);
     for (size_t i = 0; i < p->n; i++) {
         const Node *n = &p->v[i];
         const char *col = n->state == ST_DONE ? C_GREEN :
@@ -788,6 +769,23 @@ static int sync_aur(const StrList *aur, const Options *o)
     return rc;
 }
 
+/* "name", "repo/name" or "aur/name"; on success *name points at the bare name. */
+static bool split_target(const char *t, char *repo, size_t rsz, const char **name)
+{
+    const char *sl = strchr(t, '/');
+    repo[0] = '\0';
+    *name = t;
+    if (sl == NULL)
+        return valid_pkgname(t);
+    size_t n = (size_t)(sl - t);
+    if (n == 0 || n >= rsz)
+        return false;
+    memcpy(repo, t, n);
+    repo[n] = '\0';
+    *name = sl + 1;
+    return valid_pkgname(repo) && valid_pkgname(*name);
+}
+
 int cmd_sync(const StrList *targets, const Options *o)
 {
     StrList repo, aur;
@@ -795,47 +793,48 @@ int cmd_sync(const StrList *targets, const Options *o)
     sl_init(&aur);
     int rc = 0;
     for (size_t i = 0; i < targets->n; i++) {
-        const char *t = targets->v[i];
-        bool force_aur = strncmp(t, "aur/", 4) == 0;
-        if (force_aur)
-            t += 4;
-        if (!valid_pkgname(t)) {
+        const char *t = targets->v[i], *name;
+        char rname[MAX_NAME_LEN + 1];
+        if (!split_target(t, rname, sizeof rname, &name)) {
             fputs("error: invalid package name: ", stderr);
-            safe_fputs(stderr, targets->v[i]);
+            safe_fputs(stderr, t);
             fputc('\n', stderr);
             rc = 1;
             goto out;
         }
-        if (!force_aur && pacman_dep_in_repos(t))
-            sl_push_unique(&repo, t);
-        else
-            sl_push_unique(&aur, t);
-    }
-
-    if (repo.n) {
-        const char *elev = privilege_elevator();
-        if (elev == NULL) {
-            fprintf(stderr, "error: sudo or doas is required\n");
+        bool force_aur = strcmp(rname, "aur") == 0;
+        bool force_repo = rname[0] && !force_aur;
+        if ((force_aur && o->repo_only) || (force_repo && o->aur_only)) {
+            fputs("error: target conflicts with --aur/--repo: ", stderr);
+            safe_fputs(stderr, t);
+            fputc('\n', stderr);
             rc = 1;
             goto out;
         }
-        const char **argv = xcalloc(repo.n + 8, sizeof(char *));
-        size_t k = 0;
-        argv[k++] = elev;
-        argv[k++] = BIN_PACMAN;
-        argv[k++] = "-S";
+        if (force_repo || o->repo_only || (!force_aur && !o->aur_only && pacman_dep_in_repos(name)))
+            sl_push_unique(&repo, t);
+        else
+            sl_push_unique(&aur, name);
+    }
+
+    if (repo.n) {
+        StrList args;
+        sl_init(&args);
+        sl_push(&args, "--sync");
+        sl_extend(&args, o->common);
+        sl_extend(&args, o->xact);
         if (o->needed)
-            argv[k++] = "--needed";
-        if (o->noconfirm)
-            argv[k++] = "--noconfirm";
-        argv[k++] = "--";
-        for (size_t i = 0; i < repo.n; i++)
-            argv[k++] = repo.v[i];
-        argv[k] = NULL;
-        ProcOpts po;
-        memset(&po, 0, sizeof po);
-        rc = proc_run(argv, &po) == 0 ? 0 : 1;
-        free(argv);
+            sl_push(&args, "--needed");
+        if (o->asdeps)
+            sl_push(&args, "--asdeps");
+        if (o->asexplicit)
+            sl_push(&args, "--asexplicit");
+        rc = pacman_run(true, &args, &repo) == 0 ? 0 : 1;
+        sl_free(&args);
+        for (size_t i = 0; rc == 0 && o->touched && i < repo.n; i++) {
+            const char *sl = strchr(repo.v[i], '/');
+            sl_push_unique(o->touched, sl ? sl + 1 : repo.v[i]);
+        }
         if (rc)
             goto out;
     }
@@ -847,34 +846,27 @@ out:
     return rc;
 }
 
-int cmd_upgrade(const Options *o, bool sync_repos)
+static bool is_ignored(const Options *o, const StrList *conf_ignore, const char *name)
 {
-    if (sync_repos) {
-        const char *elev = privilege_elevator();
-        if (elev == NULL) {
-            fprintf(stderr, "error: sudo or doas is required\n");
-            return 1;
-        }
-        const char *argv[] = { elev, BIN_PACMAN, "-Syu",
-                               o->noconfirm ? "--noconfirm" : NULL, NULL };
-        ProcOpts po;
-        memset(&po, 0, sizeof po);
-        printf(":: Synchronizing package databases and upgrading repositories...\n");
-        if (proc_run(argv, &po) != 0)
-            return 1;
-    }
+    return (o->ignore && sl_contains(o->ignore, name)) || sl_contains(conf_ignore, name);
+}
 
-    StrList names, vers;
+/* Foreign packages with a newer AUR version. Prints them unless quiet
+ * (then only names). Returns 0, or -1 if the AUR could not be queried. */
+static int find_aur_updates(const Options *o, StrList *upd, bool quiet)
+{
+    StrList names, vers, conf_ignore;
     sl_init(&names);
     sl_init(&vers);
+    sl_init(&conf_ignore);
     if (pacman_foreign(&names, &vers) != 0) {
         fprintf(stderr, "error: could not list foreign packages\n");
-        return 1;
+        return -1;
     }
-    printf(":: Checking %zu foreign packages against the AUR...\n", names.n);
+    pacman_conf_list(o->config, "IgnorePkg", &conf_ignore);
+    if (!quiet)
+        printf(":: Checking %zu foreign packages against the AUR...\n", names.n);
 
-    StrList upd;
-    sl_init(&upd);
     int rc = 0;
     for (size_t off = 0; off < names.n && rc == 0; off += RPC_BATCH) {
         StrList batch;
@@ -883,15 +875,24 @@ int cmd_upgrade(const Options *o, bool sync_repos)
             sl_push(&batch, names.v[i]);
         RpcResult res;
         if (rpc_info(&batch, &res) != 0) {
-            rc = 1;
+            rc = -1;
         } else {
             for (size_t i = off; i < names.n && i < off + RPC_BATCH; i++) {
                 const AurPkg *a = rpc_find(&res, names.v[i]);
-                if (a && pkg_vercmp(a->version, vers.v[i]) > 0) {
+                if (a == NULL || pkg_vercmp(a->version, vers.v[i]) <= 0)
+                    continue;
+                if (is_ignored(o, &conf_ignore, a->name)) {
+                    if (!quiet)
+                        printf("%swarning:%s %s: ignoring package upgrade (%s => %s)\n",
+                               C_YEL, C_END, a->name, vers.v[i], a->version);
+                    continue;
+                }
+                if (quiet)
+                    printf("%s\n", a->name);
+                else
                     printf("   %s%-30s%s %s%s%s -> %s%s%s\n", C_BOLD, a->name, C_END,
                            C_RED, vers.v[i], C_END, C_GREEN, a->version, C_END);
-                    sl_push(&upd, a->name);
-                }
+                sl_push(upd, a->name);
             }
             rpc_result_free(&res);
         }
@@ -899,12 +900,56 @@ int cmd_upgrade(const Options *o, bool sync_repos)
     }
     sl_free(&names);
     sl_free(&vers);
+    sl_free(&conf_ignore);
+    return rc;
+}
+
+int cmd_aur_updates(const Options *o, bool quiet)
+{
+    StrList upd;
+    sl_init(&upd);
+    int rc = find_aur_updates(o, &upd, quiet);
+    int n = rc == 0 ? (int)upd.n : -1;
+    sl_free(&upd);
+    return n;
+}
+
+int cmd_upgrade(const Options *o)
+{
+    if (!o->aur_only) {
+        StrList args;
+        sl_init(&args);
+        sl_push(&args, "--sync");
+        for (size_t i = 0; i < o->refresh_level; i++)
+            sl_push(&args, "--refresh");
+        for (size_t i = 0; i < o->upgrade_level; i++)
+            sl_push(&args, "--sysupgrade");
+        sl_extend(&args, o->common);
+        sl_extend(&args, o->xact);
+        if (o->needed)
+            sl_push(&args, "--needed");
+        if (o->refresh_level)
+            printf(":: Synchronizing package databases and upgrading repositories...\n");
+        else
+            printf(":: Upgrading repository packages...\n");
+        int r = pacman_run(true, &args, NULL);
+        sl_free(&args);
+        if (r != 0)
+            return 1;
+    }
+    if (o->repo_only)
+        return 0;
+
+    StrList upd;
+    sl_init(&upd);
+    int rc = find_aur_updates(o, &upd, false) == 0 ? 0 : 1;
 
     if (rc == 0 && upd.n == 0)
         printf(" there is nothing to do\n");
     else if (rc == 0 && ask_yesno("Upgrade these AUR packages?", true, o->noconfirm)) {
         Options o2 = *o;
         o2.needed = false;
+        o2.asdeps = o2.asexplicit = false;   /* upgrades keep the install reason */
         Plan p;
         plan_init(&p, &o2);
         int unresolved = 0;
@@ -953,6 +998,22 @@ static int clean_build_files(const char *dir)
 
 int cmd_clean(const Options *o, bool all)
 {
+    if (!o->aur_only) {
+        StrList args;
+        sl_init(&args);
+        sl_push(&args, "--sync");
+        sl_push(&args, "--clean");
+        if (all)
+            sl_push(&args, "--clean");
+        sl_extend(&args, o->common);
+        int r = pacman_run(true, &args, NULL);
+        sl_free(&args);
+        if (r != 0)
+            return 1;
+    }
+    if (o->repo_only)
+        return 0;
+    printf("\n:: AUR build cache: %s\n", o->cache);
     if (all && !ask_yesno("Remove ALL cloned AUR repositories (and your review history)?",
                           false, o->noconfirm))
         return 1;
