@@ -12,6 +12,34 @@
 
 static const StrList *g_ctx;
 static bool g_ran_root;
+static const char *g_conf;
+static pid_t g_bg = -1;
+static const char *g_bg_log;
+
+void pacman_set_config_path(const char *path)
+{
+    g_conf = path;
+}
+
+void pacman_bg_set(pid_t pid, const char *log)
+{
+    g_bg = pid;
+    g_bg_log = log;
+}
+
+int pacman_bg_wait(void)
+{
+    if (g_bg <= 0)
+        return 0;
+    if (!proc_has_exited(g_bg))
+        printf(":: Waiting for the background repository download...\n");
+    int rc = proc_wait_pid(g_bg);
+    g_bg = -1;
+    if (rc != 0)
+        printf("%s::%s background download did not finish (see %s); pacman downloads "
+               "what is missing\n", C_YEL, C_END, g_bg_log ? g_bg_log : "its log");
+    return rc;
+}
 
 bool pacman_ran_as_root(void)
 {
@@ -159,10 +187,61 @@ int pacman_installed_names(StrList *out)
     return rc == 0 ? 0 : -1;
 }
 
+int pacman_capture(const StrList *args, StrBuf *out)
+{
+    const char **argv = build_argv(NULL, NULL, args, NULL);
+    ProcOpts o;
+    memset(&o, 0, sizeof o);
+    o.stdin_null = true;
+    o.stderr_null = true;
+    o.capture = out;
+    int rc = proc_run(argv, &o);
+    free(argv);
+    return rc;
+}
+
+int pacman_conf_repo_servers(const char *repo, StrList *out)
+{
+    char cfg[PATH_BUF], rarg[300];
+    const char *argv[7];
+    size_t k = 0;
+    argv[k++] = BIN_PACMAN_CONF;
+    if (g_conf) {
+        snprintf(cfg, sizeof cfg, "--config=%s", g_conf);
+        argv[k++] = cfg;
+    }
+    snprintf(rarg, sizeof rarg, "--repo=%s", repo);
+    argv[k++] = rarg;
+    argv[k++] = "--";
+    argv[k++] = "Server";
+    argv[k] = NULL;
+    StrBuf buf;
+    sb_init(&buf, 1u << 20);
+    ProcOpts o;
+    memset(&o, 0, sizeof o);
+    o.stdin_null = true;
+    o.stderr_null = true;
+    o.capture = &buf;
+    int rc = proc_run(argv, &o);
+    if (rc == 0) {
+        StrList l;
+        sl_init(&l);
+        sl_split_lines(&l, buf.data);
+        for (size_t i = 0; i < l.n; i++)
+            if (strncmp(l.v[i], "https://", 8) == 0 || strncmp(l.v[i], "http://", 7) == 0)
+                sl_push(out, l.v[i]);
+        sl_free(&l);
+    }
+    sb_free(&buf);
+    return rc == 0 ? 0 : -1;
+}
+
 int pacman_conf_list(const char *config, const char *key, StrList *out)
 {
     char cfg[PATH_BUF];
     const char *argv[5];
+    if (config == NULL)
+        config = g_conf;
     size_t k = 0;
     argv[k++] = BIN_PACMAN_CONF;
     if (config) {
@@ -200,11 +279,49 @@ int pacman_run(bool as_root, const StrList *args, const StrList *targets)
     ProcOpts o;
     memset(&o, 0, sizeof o);
     fflush(stdout);
-    if (as_root)
+    if (as_root) {
+        pacman_bg_wait();   /* the background pacman holds the lock */
         g_ran_root = true;
+    }
     int rc = proc_run(argv, &o);
     free(argv);
     return rc;
+}
+
+pid_t pacman_spawn_root(const StrList *args, int log_fd)
+{
+    const char *elev = privilege_elevator();
+    if (elev == NULL)
+        return -1;
+    const char **inner = build_argv(NULL, NULL, args, NULL);
+    size_t n = 0;
+    while (inner[n])
+        n++;
+    const char **argv = xcalloc(n + 3, sizeof(char *));
+    argv[0] = elev;
+    argv[1] = "-n";   /* sudo and doas: non-interactive */
+    for (size_t i = 0; i < n; i++)
+        argv[2 + i] = inner[i];
+    argv[n + 2] = NULL;
+    ProcOpts o;
+    memset(&o, 0, sizeof o);
+    pid_t pid = proc_spawn(argv, &o, log_fd);
+    free(argv);
+    free(inner);
+    if (pid > 0)
+        g_ran_root = true;
+    return pid;
+}
+
+void pacman_refresh_credentials(void)
+{
+    const char *elev = privilege_elevator();
+    if (elev == NULL || strcmp(elev, BIN_SUDO) != 0)
+        return;
+    const char *argv[] = { elev, "-v", NULL };
+    ProcOpts o;
+    memset(&o, 0, sizeof o);
+    proc_run(argv, &o);
 }
 
 int pacman_snapshot(StrList *out)

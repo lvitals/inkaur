@@ -4,6 +4,7 @@
 #include "buf.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <sys/types.h>
 
 /*
@@ -40,9 +41,22 @@ int proc_run(const char *const argv[], const ProcOpts *opts);
  */
 pid_t proc_spawn(const char *const argv[], const ProcOpts *opts, int log_fd);
 
-/* Wait for any child started with proc_spawn. Returns its pid and stores
- * the exit status (128+signal if killed) in *rc; -1 when none are left. */
-pid_t proc_wait_any(int *rc);
+/* Wait until one of the n pids in set exits. Other children that exit
+ * meanwhile are remembered for proc_wait_pid(), so independent background
+ * work is never lost. Returns the pid (status in *rc), or -1. */
+pid_t proc_wait_set(const pid_t *set, size_t n, int *rc);
+/* Wait for one specific child; returns its status or -1. */
+int proc_wait_pid(pid_t pid);
+/* true if the child has already exited (it is then reaped and remembered). */
+bool proc_has_exited(pid_t pid);
+
+/*
+ * Run fn(i, ctx, out) for i in 0..n-1 in forked worker processes, at most
+ * `jobs` at a time. Each worker's out (keep it small, < 4 KiB) is returned
+ * in results->v[i] ("" if the worker failed). Workers have no terminal.
+ */
+typedef void (*ProcJobFn)(size_t i, void *ctx, StrBuf *out);
+void proc_fork_jobs(size_t n, size_t jobs, ProcJobFn fn, void *ctx, StrList *results);
 
 /* Number of online CPUs (at least 1). */
 long cpu_count(void);

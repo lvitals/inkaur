@@ -26,6 +26,10 @@
 #define BIN_DOAS           "/usr/bin/doas"
 #define BIN_LESS           "/usr/bin/less"
 #define BIN_BSDTAR         "/usr/bin/bsdtar"
+#define BIN_INSTALL        "/usr/bin/install"
+
+#define PACMAN_CONF_PATH   "/etc/pacman.conf"
+#define MIRRORLIST_PATH    "/etc/pacman.d/mirrorlist"
 
 /* PATH handed to every child process. */
 #define SAFE_PATH "/usr/bin:/usr/sbin:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl"

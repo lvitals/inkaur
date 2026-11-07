@@ -66,6 +66,12 @@ void run_cli_tests(void)
            "--speedtest help");
     ASSERT(run("./inkaur -Sh", out, sizeof out) == 0 && strstr(out, "--serial") &&
            strstr(out, "--fetch-jobs"), "-Sh documents parallelism");
+    ASSERT(run("./inkaur -Syu --repo-download=fast 2>&1", out, sizeof out) == 1 &&
+           strstr(out, "--repo-download"), "bad --repo-download");
+    ASSERT(run("./inkaur -Syu --mirrors 9 2>&1", out, sizeof out) == 1, "--mirrors 9 refused");
+    ASSERT(run("./inkaur --rankmirrors -h", out, sizeof out) == 0 && strstr(out, "lastsync"),
+           "--rankmirrors help");
+    ASSERT(run("./inkaur --rankmirrors --count 0 2>&1", out, sizeof out) == 1, "--count 0");
     ASSERT(run("./inkaur -S ../.. 2>&1", out, sizeof out) == 1 &&
            strstr(out, "Summary of changes") == NULL, "no summary when nothing ran");
 

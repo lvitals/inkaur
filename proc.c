@@ -298,16 +298,159 @@ pid_t proc_spawn(const char *const argv[], const ProcOpts *opts, int log_fd)
     return pid;
 }
 
-pid_t proc_wait_any(int *rc)
+#define REAPED_MAX 64
+static struct { pid_t pid; int rc; } g_reaped[REAPED_MAX];
+static size_t g_nreaped;
+
+static bool take_reaped(pid_t pid, int *rc)
 {
+    for (size_t i = 0; i < g_nreaped; i++)
+        if (g_reaped[i].pid == pid) {
+            if (rc)
+                *rc = g_reaped[i].rc;
+            g_reaped[i] = g_reaped[--g_nreaped];
+            return true;
+        }
+    return false;
+}
+
+static void remember(pid_t pid, int rc)
+{
+    if (g_nreaped < REAPED_MAX) {
+        g_reaped[g_nreaped].pid = pid;
+        g_reaped[g_nreaped].rc = rc;
+        g_nreaped++;
+    }
+}
+
+pid_t proc_wait_set(const pid_t *set, size_t n, int *rc)
+{
+    for (size_t i = 0; i < n; i++)
+        if (set[i] > 0 && take_reaped(set[i], rc))
+            return set[i];
+    for (;;) {
+        int status = 0;
+        pid_t w = waitpid(-1, &status, 0);
+        if (w < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        int r = decode_status(status);
+        for (size_t i = 0; i < n; i++)
+            if (set[i] == w) {
+                if (rc)
+                    *rc = r;
+                return w;
+            }
+        remember(w, r);
+    }
+}
+
+int proc_wait_pid(pid_t pid)
+{
+    int rc = -1;
+    if (take_reaped(pid, &rc))
+        return rc;
     int status = 0;
     pid_t w;
     do {
-        w = waitpid(-1, &status, 0);
+        w = waitpid(pid, &status, 0);
     } while (w < 0 && errno == EINTR);
-    if (w > 0 && rc)
-        *rc = decode_status(status);
-    return w;
+    return w == pid ? decode_status(status) : -1;
+}
+
+bool proc_has_exited(pid_t pid)
+{
+    for (size_t i = 0; i < g_nreaped; i++)
+        if (g_reaped[i].pid == pid)
+            return true;
+    int status = 0;
+    pid_t w = waitpid(pid, &status, WNOHANG);
+    if (w == pid) {
+        remember(pid, decode_status(status));
+        return true;
+    }
+    return w < 0;
+}
+
+void proc_fork_jobs(size_t n, size_t jobs, ProcJobFn fn, void *ctx, StrList *results)
+{
+    for (size_t i = 0; i < n; i++)
+        sl_push(results, "");
+    if (jobs < 1)
+        jobs = 1;
+    if (jobs > REAPED_MAX)
+        jobs = REAPED_MAX;
+    pid_t pids[REAPED_MAX];
+    int fds[REAPED_MAX];
+    size_t idx[REAPED_MAX];
+    size_t nrun = 0, next = 0;
+    while (next < n || nrun) {
+        while (nrun < jobs && next < n) {
+            size_t i = next++;
+            int pfd[2];
+            if (pipe(pfd) != 0)
+                continue;
+            fflush(NULL);
+            pid_t pid = fork();
+            if (pid < 0) {
+                close(pfd[0]);
+                close(pfd[1]);
+                continue;
+            }
+            if (pid == 0) {
+                close(pfd[0]);
+                int null = open("/dev/null", O_RDWR);
+                if (null >= 0) {
+                    dup2(null, STDIN_FILENO);
+                    dup2(null, STDOUT_FILENO);
+                    dup2(null, STDERR_FILENO);
+                    if (null > 2)
+                        close(null);
+                }
+                StrBuf out;
+                sb_init(&out, 4000);   /* below PIPE_BUF-ish: never blocks */
+                fn(i, ctx, &out);
+                size_t off = 0;
+                while (off < out.len) {
+                    ssize_t w = write(pfd[1], out.data + off, out.len - off);
+                    if (w <= 0)
+                        break;
+                    off += (size_t)w;
+                }
+                _exit(0);
+            }
+            close(pfd[1]);
+            pids[nrun] = pid;
+            fds[nrun] = pfd[0];
+            idx[nrun] = i;
+            nrun++;
+        }
+        if (nrun == 0)
+            break;
+        int rc;
+        pid_t w = proc_wait_set(pids, nrun, &rc);
+        if (w < 0)
+            break;
+        for (size_t k = 0; k < nrun; k++) {
+            if (pids[k] != w)
+                continue;
+            char buf[4096];
+            ssize_t r = read(fds[k], buf, sizeof buf - 1);
+            close(fds[k]);
+            if (r > 0 && rc == 0) {
+                buf[r] = '\0';
+                free(results->v[idx[k]]);
+                results->v[idx[k]] = xstrdup(buf);
+            }
+            pids[k] = pids[nrun - 1];
+            fds[k] = fds[nrun - 1];
+            idx[k] = idx[nrun - 1];
+            nrun--;
+            break;
+        }
+    }
 }
 
 long cpu_count(void)

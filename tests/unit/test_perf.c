@@ -14,9 +14,9 @@ void run_perf_tests(void)
            perf_parse_jobs("-1") < 0 && perf_parse_jobs("") < 0, "bad jobs refused");
 
     const char *conf = "# comment\n[options]\nParallel = yes\nBuildJobs = 3   # inline\n"
-                       "FetchJobs=auto\nPrefetch = no\nSpeedTest = always\n";
+                       "FetchJobs=auto\nRepoDownload = mirrors\nMirrors = 4\nSpeedTest = always\n";
     ASSERT(perf_config_parse(conf, "test", &c) == 0, "config parses");
-    ASSERT(c.parallel == 1 && c.build_jobs == 3 && c.fetch_jobs == 0 && c.prefetch == 0 &&
+    ASSERT(c.parallel == 1 && c.build_jobs == 3 && c.fetch_jobs == 0 && c.repo_download == 2 && c.mirrors == 4 &&
            c.speedtest == 2, "config values");
     PerfConfig bad;
     perf_config_defaults(&bad);
@@ -34,7 +34,7 @@ void run_perf_tests(void)
     f.cpus = 16;
     f.mem_gib = 30;
     perf_decide(&a, &f, false, &p);
-    ASSERT(p.fetch_jobs == 4 && p.build_jobs == 4 && p.prefetch, "auto accelerates by default");
+    ASSERT(p.fetch_jobs == 4 && p.build_jobs == 4 && p.repo_download == 1, "auto accelerates by default");
 
     /* slow computer */
     f.cpus = 2;
@@ -48,10 +48,10 @@ void run_perf_tests(void)
     f.have_speed = true;
     f.bytes_per_sec = 60 * 1024;
     perf_decide(&a, &f, false, &p);
-    ASSERT(p.fetch_jobs == 1 && !p.prefetch && p.build_jobs == 2, "slow link: serial fetch");
+    ASSERT(p.fetch_jobs == 1 && p.repo_download == 0 && p.build_jobs == 2, "slow link: serial fetch");
     f.bytes_per_sec = 20.0 * 1024 * 1024;
     perf_decide(&a, &f, false, &p);
-    ASSERT(p.fetch_jobs == 8 && p.prefetch, "fast link: more fetch jobs");
+    ASSERT(p.fetch_jobs == 8 && p.repo_download == 1, "fast link: more fetch jobs");
 
     /* explicit settings, serial mode, chroot */
     a.build_jobs = 6;
@@ -61,7 +61,7 @@ void run_perf_tests(void)
     ASSERT(p.build_jobs == 1, "chroot builds are serial");
     a.parallel = 0;
     perf_decide(&a, &f, false, &p);
-    ASSERT(p.build_jobs == 1 && p.fetch_jobs == 1 && !p.prefetch, "Parallel = no");
+    ASSERT(p.build_jobs == 1 && p.fetch_jobs == 1 && p.repo_download == 0, "Parallel = no");
 
     printf("perf: ok\n");
 }

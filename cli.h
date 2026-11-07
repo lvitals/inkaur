@@ -21,7 +21,7 @@
  */
 
 typedef struct {
-    char op;               /* D F Q R S T U V A, N (--speedtest), or 0 */
+    char op;               /* D F Q R S T U V A, N (--speedtest), M (--rankmirrors), or 0 */
     bool help;
     StrList seen;          /* long name of every option given (repeats kept) */
     StrList common;        /* forwarded: options valid for every operation */
@@ -37,6 +37,9 @@ typedef struct {
     const char *jobs;      /* --jobs value (build jobs), or NULL */
     const char *fetch_jobs;/* --fetch-jobs value, or NULL */
     int parallel;          /* --parallel 1, --serial 0, unset -1 */
+    const char *repo_download; /* --repo-download value, or NULL */
+    const char *mirrors;   /* --mirrors value, or NULL */
+    const char *count;     /* --rankmirrors --count value, or NULL */
 } Cli;
 
 void cli_init(Cli *c);

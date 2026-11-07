@@ -4,6 +4,7 @@
 #include "buf.h"
 
 #include <stdbool.h>
+#include <sys/types.h>
 
 /*
  * Thin wrappers over /usr/bin/pacman (no libalpm linkage). Every target is
@@ -36,6 +37,28 @@ int pacman_conf_list(const char *config, const char *key, StrList *out);
 int pacman_run(bool as_root, const StrList *args, const StrList *targets);
 /* true once pacman_run() has started pacman as root. */
 bool pacman_ran_as_root(void);
+
+/* Quiet non-root pacman run capturing stdout: pacman <context> <args...>. */
+int pacman_capture(const StrList *args, StrBuf *out);
+
+/* --config given on the command line (used by pacman-conf calls), or NULL. */
+void pacman_set_config_path(const char *path);
+/* Expanded Server URLs of a repository, in pacman's order. */
+int pacman_conf_repo_servers(const char *repo, StrList *out);
+
+/*
+ * A root pacman running in the background (e.g. pacman -Suw while the AUR
+ * is reviewed) holds the database lock. pacman_run(as_root) waits for it
+ * first, so foreground transactions never collide with it.
+ */
+void pacman_bg_set(pid_t pid, const char *log);
+/* Root pacman without a terminal: sudo -n / doas -n (never prompts; fails if
+ * the credentials are not cached). Output to log_fd. Returns pid or -1. */
+pid_t pacman_spawn_root(const StrList *args, int log_fd);
+/* sudo -v, so a following background pacman_spawn_root() can run. */
+void pacman_refresh_credentials(void);
+/* Waits for the background pacman (if any); returns its exit status, 0 if none. */
+int pacman_bg_wait(void);
 
 /* Snapshot of the installed packages: sorted "name version" lines. */
 int pacman_snapshot(StrList *out);

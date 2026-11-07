@@ -83,10 +83,15 @@ order still holds:
 
 * **Fetch.** AUR git repositories are cloned/fetched several at a time: the
   targets first, then each wave of AUR dependencies.
-* **Overlap.** During `-Syu`, the AUR updates are looked up and their
-  repositories fetched in the background while `pacman -Syu` downloads and
-  waits at its prompt. Nothing from that background step is trusted: the main
-  process checks everything again afterwards.
+* **Overlap.** `-Syu` runs `pacman -Sy`, then downloads the repository upgrade
+  in the background (`sudo -n pacman -Suw`, log in
+  `~/.cache/inkaur/.logs/repo-download.log`) while the AUR updates are looked
+  up, fetched and reviewed. Right before the first AUR build, `pacman -Su`
+  installs from the cache, so AUR packages are never built against a system
+  that has not been upgraded yet. If that upgrade fails or you decline it, no
+  AUR package is built. Any foreground root pacman call waits for the
+  background one first (database lock). Queries (`-T`, `-Sp`, `-Q`, `-Si`)
+  don't take the lock, so resolution keeps working meanwhile.
 * **Build.** Up to *BuildJobs* AUR packages are built at once. A package starts
   only after every AUR package it depends on has been built, audited and
   installed. Repository dependencies of the builds are installed first in one
@@ -99,7 +104,7 @@ order still holds:
 The defaults (`auto`) speed things up. They scale down on fewer than 4 CPUs,
 less than 3 GiB of free RAM, or a slow connection:
 
-| measured speed | fetch jobs | prefetch during -Syu |
+| measured speed | fetch jobs | background repo download |
 |---|---|---|
 | not measured | 4 | yes |
 | < 128 KiB/s | 1 | no |
@@ -115,6 +120,8 @@ inkaur --speedtest       # AUR latency, mirror throughput, CPUs, RAM, pacman
                          # ParallelDownloads, and the values inkaur will use
 inkaur -Syu --serial     # one thing at a time (slow/metered link, slow computer)
 inkaur -Syu --jobs 4 --fetch-jobs 8
+inkaur -Syu --repo-download=mirrors --mirrors 3   # split downloads across mirrors
+inkaur --rankmirrors     # rank /etc/pacman.d/mirrorlist (--all: commented ones too)
 ```
 
 `--speedtest` saves its result for 7 days, and `auto` uses it. Settings go in
@@ -126,12 +133,37 @@ overrides; files must not be group/world-writable):
 Parallel  = auto     # auto | yes | no
 BuildJobs = auto     # auto | 1..64
 FetchJobs = auto     # auto | 1..64
-Prefetch  = auto     # auto | yes | no
+RepoDownload = auto  # auto | pacman (pacman -Suw) | mirrors (inkaur) | no
+Mirrors   = auto     # mirrors per repository for RepoDownload = mirrors (1..8)
 SpeedTest = auto     # auto (use the saved result) | always (measure before -Su) | never
 ```
 
-Repository downloads stay with pacman: set `ParallelDownloads` in
-`/etc/pacman.conf`. `--speedtest` suggests a value.
+### Repository downloads and mirrors
+
+* **ParallelDownloads.** `inkaur --speedtest` recommends a value for the
+  measured throughput (< 128 KiB/s: 1, < 512 KiB/s: 2, < 2 MiB/s: 3,
+  < 8 MiB/s: 5, faster: 8). Interactively, it offers to write it to
+  `/etc/pacman.conf`: it shows the change, asks (default no) and keeps
+  `pacman.conf.inkaur-bak`.
+* **Mirror ranking.** `inkaur --rankmirrors` downloads `core.db` from every
+  `Server` in the mirrorlist in parallel and reads each mirror's `lastsync`.
+  Mirrors more than 6 hours behind the freshest are listed as out of date and
+  never selected. After you confirm, the fastest up-to-date ones (`--count`,
+  default 10) become active, and the previous entries stay as comments
+  (backup `mirrorlist.inkaur-bak`).
+* **Multi-mirror download** (`RepoDownload = mirrors`). The pending files
+  (`pacman -Sup`) are split across the first *Mirrors* servers of each
+  repository, with fallback to the others. They are downloaded as your user
+  into `~/.cache/inkaur/.pkgdl`, checked for the exact size, and copied
+  root-owned into pacman's cache with `install -o root`. pacman then verifies
+  every signature from the sync database, exactly as for its own downloads, so
+  a tampered or truncated file is rejected. Files that fail are simply left
+  for pacman. This only helps if a mirror limits the speed per connection;
+  otherwise `RepoDownload = pacman` is just as fast.
+
+Files written as root (`pacman.conf`, `mirrorlist`, cached packages) are
+always installed through `sudo`/`doas` `/usr/bin/install`, never through a
+shell.
 
 ## Security model
 

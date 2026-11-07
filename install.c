@@ -4,6 +4,7 @@
 #include "config.h"
 #include "fsutil.h"
 #include "git.h"
+#include "mirrors.h"
 #include "pacman.h"
 #include "perf.h"
 #include "proc.h"
@@ -148,7 +149,10 @@ static void prefetch_bases(const Options *o, const StrList *bases, bool quiet)
         if (nrun == 0)
             break;
         int rc = -1;
-        pid_t w = proc_wait_any(&rc);
+        pid_t set[PERF_MAX_JOBS];
+        for (size_t k = 0; k < nrun; k++)
+            set[k] = run[k].pid;
+        pid_t w = proc_wait_set(set, nrun, &rc);
         if (w < 0)
             break;
         for (size_t k = 0; k < nrun; k++) {
@@ -803,7 +807,7 @@ static void apply_leave_out(Plan *p, size_t i, bool remove)
     drop_dependents(p, i);
 }
 
-static int print_summary(const Plan *p, bool aborted)
+static int print_summary(const Plan *p, const char *aborted)
 {
     static const char *const names[] = { "not built", "skipped", "removed", "FAILED", "installed" };
     int failed = 0;
@@ -820,7 +824,7 @@ static int print_summary(const Plan *p, bool aborted)
             failed++;
     }
     if (aborted)
-        printf("   aborted by you; pending packages were not built\n");
+        printf("   %s; pending packages were not built\n", aborted);
     return (failed || aborted) ? 1 : 0;
 }
 
@@ -943,9 +947,7 @@ static void stop_builds(Plan *p)
             kill(p->v[i].pid, SIGTERM);
     for (size_t i = 0; i < p->n; i++)
         if (p->v[i].running) {
-            int st;
-            while (waitpid(p->v[i].pid, &st, 0) < 0 && errno == EINTR)
-                ;
+            proc_wait_pid(p->v[i].pid);
             p->v[i].running = false;
         }
 }
@@ -1013,7 +1015,13 @@ static int run_parallel(Plan *p)
             break;
 
         int rc = -1;
-        pid_t w = proc_wait_any(&rc);
+        pid_t *set = xcalloc(p->n, sizeof(pid_t));
+        size_t ns = 0;
+        for (size_t k = 0; k < p->n; k++)
+            if (p->v[k].running)
+                set[ns++] = p->v[k].pid;
+        pid_t w = proc_wait_set(set, ns, &rc);
+        free(set);
         if (w < 0)
             break;
         size_t i = p->n;
@@ -1094,7 +1102,7 @@ static int run_plan(Plan *p)
         Decision d = review_package(&ctx, &rep);
         report_free(&rep);
         if (d == DEC_ABORT)
-            return print_summary(p, true);
+            return print_summary(p, "aborted by you");
         if (d == DEC_SKIP || d == DEC_REMOVE)
             apply_leave_out(p, i, d == DEC_REMOVE);
     }
@@ -1103,15 +1111,18 @@ static int run_plan(Plan *p)
     size_t pending = 0;
     for (size_t i = 0; i < p->n; i++)
         pending += p->v[i].state == ST_PENDING;
+    if (pending && p->o->before_builds && p->o->before_builds(p->o->hook_ctx) != 0)
+        return print_summary(p, "the repository upgrade did not complete, so nothing was "
+                                "built against a partially upgraded system");
     if (p->o->build_jobs > 1 && pending > 1 && p->o->chroot == NULL)
-        return print_summary(p, run_parallel(p) != 0);
+        return print_summary(p, run_parallel(p) != 0 ? "aborted by you" : NULL);
     for (size_t i = 0; i < p->n; i++) {
         Node *n = &p->v[i];
         if (n->state != ST_PENDING)
             continue;
         int r = build_node(p, n);
         if (r == BUILD_ABORT)
-            return print_summary(p, true);
+            return print_summary(p, "aborted by you");
         if (r == BUILD_SKIP || r == BUILD_REMOVE) {
             apply_leave_out(p, i, r == BUILD_REMOVE);
             continue;
@@ -1123,7 +1134,7 @@ static int run_plan(Plan *p)
         }
         mark(n, ST_DONE, NULL);
     }
-    return print_summary(p, false);
+    return print_summary(p, NULL);
 }
 
 static void plan_init(Plan *p, const Options *o)
@@ -1310,74 +1321,93 @@ int cmd_aur_updates(const Options *o, bool quiet)
     return n;
 }
 
-/*
- * While pacman -Syu runs (and waits at its prompt), a forked copy of inkaur
- * looks up the AUR updates and fetches their repositories in the background,
- * with no terminal output. Git data lands in the cache; the main process
- * re-checks everything afterwards, so nothing it finds is trusted blindly.
- */
-static pid_t start_background_prefetch(const Options *o)
+static void upgrade_args(const Options *o, StrList *args, size_t refresh)
 {
-    fflush(NULL);
-    pid_t pid = fork();
-    if (pid != 0)
-        return pid;
-    int fd = open("/dev/null", O_RDWR);
-    if (fd >= 0) {
-        dup2(fd, STDIN_FILENO);
-        dup2(fd, STDOUT_FILENO);
-        dup2(fd, STDERR_FILENO);
-        if (fd > 2)
-            close(fd);
-    }
-    StrList upd, bases;
-    sl_init(&upd);
-    sl_init(&bases);
-    if (find_aur_updates(o, &upd, &bases, true) == 0)
-        prefetch_bases(o, &bases, true);
-    _exit(0);
+    sl_push(args, "--sync");
+    for (size_t i = 0; i < refresh; i++)
+        sl_push(args, "--refresh");
+    for (size_t i = 0; i < o->upgrade_level; i++)
+        sl_push(args, "--sysupgrade");
+    sl_extend(args, o->common);
+    sl_extend(args, o->xact);
 }
 
-int cmd_upgrade(const Options *o)
+static const char *cachedir_option(const Options *o)
 {
-    pid_t bg = -1;
-    if (!o->aur_only && !o->repo_only && o->prefetch && o->fetch_jobs > 1)
-        bg = start_background_prefetch(o);
-    if (!o->aur_only) {
-        StrList args;
-        sl_init(&args);
-        sl_push(&args, "--sync");
-        for (size_t i = 0; i < o->refresh_level; i++)
-            sl_push(&args, "--refresh");
-        for (size_t i = 0; i < o->upgrade_level; i++)
-            sl_push(&args, "--sysupgrade");
-        sl_extend(&args, o->common);
-        sl_extend(&args, o->xact);
-        if (o->needed)
-            sl_push(&args, "--needed");
-        if (o->refresh_level)
-            printf(":: Synchronizing package databases and upgrading repositories...\n");
-        else
-            printf(":: Upgrading repository packages...\n");
-        int r = pacman_run(true, &args, NULL);
-        sl_free(&args);
-        if (bg > 0) {
-            int st;
-            if (waitpid(bg, &st, WNOHANG) == 0) {
-                if (r == 0)
-                    printf(":: Waiting for the AUR prefetch to finish...\n");
-                else
-                    kill(bg, SIGTERM);
-                while (waitpid(bg, &st, 0) < 0 && errno == EINTR)
-                    ;
+    for (size_t i = 0; o->common && i < o->common->n; i++)
+        if (strncmp(o->common->v[i], "--cachedir=", 11) == 0)
+            return o->common->v[i] + 11;
+    return NULL;
+}
+
+/* State of the overlapped repository upgrade (-Sy, background download, -Su). */
+typedef struct {
+    const Options *o;
+    bool done;
+    int rc;
+    RepoDownload dl;
+} RepoStep;
+
+/* Runs once: finish the background download, then the real pacman -Su. */
+static int repo_step_finish(void *vctx)
+{
+    RepoStep *r = vctx;
+    if (r->done)
+        return r->rc;
+    r->done = true;
+    if (r->o->repo_download == 2)
+        repo_download_finish(&r->dl);
+    pacman_bg_wait();
+    printf("\n%s:: Upgrading repository packages...%s\n", C_BOLD, C_END);
+    StrList args;
+    sl_init(&args);
+    upgrade_args(r->o, &args, 0);
+    if (r->o->needed)
+        sl_push(&args, "--needed");
+    r->rc = pacman_run(true, &args, NULL) == 0 ? 0 : 1;
+    sl_free(&args);
+    return r->rc;
+}
+
+/* Starts the background download of the repository upgrade. */
+static void repo_step_start(RepoStep *r)
+{
+    const Options *o = r->o;
+    StrList args;
+    sl_init(&args);
+    upgrade_args(o, &args, 0);
+    if (o->repo_download == 2) {
+        if (repo_download_start(&r->dl, o->cache, &args, cachedir_option(o), o->mirrors,
+                                o->fetch_jobs) == 0 && r->dl.nfiles)
+            printf(":: Downloading %zu repository packages (%.1f MiB) in the background, "
+                   "split across %d mirrors\n", r->dl.nfiles, r->dl.bytes / 1048576.0,
+                   o->mirrors);
+    } else {
+        char logdir[PATH_BUF], log[PATH_BUF];
+        static char logpath[PATH_BUF];
+        sl_push(&args, "--downloadonly");
+        sl_push(&args, "--noconfirm");
+        sl_push(&args, "--noprogressbar");
+        if (path_join(logdir, sizeof logdir, o->cache, ".logs") &&
+            ensure_private_dir(logdir) == 0 &&
+            path_join(log, sizeof log, logdir, "repo-download.log")) {
+            int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+            if (fd >= 0) {
+                pid_t pid = pacman_spawn_root(&args, fd);
+                close(fd);
+                if (pid > 0) {
+                    snprintf(logpath, sizeof logpath, "%s", log);
+                    pacman_bg_set(pid, logpath);
+                    printf(":: Downloading the repository upgrade in the background\n");
+                }
             }
         }
-        if (r != 0)
-            return 1;
     }
-    if (o->repo_only)
-        return 0;
+    sl_free(&args);
+}
 
+static int aur_upgrade(const Options *o, RepoStep *step)
+{
     if (o->perf_note)
         printf(":: Parallel: %d fetch / %d build jobs (%s)\n", o->fetch_jobs, o->build_jobs,
                o->perf_note);
@@ -1395,6 +1425,10 @@ int cmd_upgrade(const Options *o)
         Options o2 = *o;
         o2.needed = false;
         o2.asdeps = o2.asexplicit = false;   /* upgrades keep the install reason */
+        if (step) {
+            o2.before_builds = repo_step_finish;
+            o2.hook_ctx = step;
+        }
         Plan p;
         plan_init(&p, &o2);
         int unresolved = 0;
@@ -1415,6 +1449,65 @@ int cmd_upgrade(const Options *o)
         plan_free(&p);
     }
     sl_free(&upd);
+    return rc;
+}
+
+/*
+ * -Su / -Syu.
+ *
+ * Overlapped (RepoDownload = pacman | mirrors): pacman -Sy, then the
+ * repository packages are downloaded in the background while the AUR side
+ * is looked up, fetched and reviewed; pacman -Su then installs them from the
+ * cache right before the first AUR build (AUR packages are never built
+ * against a system that is not upgraded yet). Plain: pacman -Syu, then AUR.
+ */
+int cmd_upgrade(const Options *o)
+{
+    bool overlap = !o->aur_only && !o->repo_only && o->repo_download > 0 && o->cache;
+    if (!overlap) {
+        if (!o->aur_only) {
+            StrList args;
+            sl_init(&args);
+            upgrade_args(o, &args, o->refresh_level);
+            if (o->needed)
+                sl_push(&args, "--needed");
+            if (o->refresh_level)
+                printf(":: Synchronizing package databases and upgrading repositories...\n");
+            else
+                printf(":: Upgrading repository packages...\n");
+            int r = pacman_run(true, &args, NULL);
+            sl_free(&args);
+            if (r != 0)
+                return 1;
+        }
+        if (o->repo_only)
+            return 0;
+        return aur_upgrade(o, NULL);
+    }
+
+    if (o->refresh_level) {
+        printf(":: Synchronizing package databases...\n");
+        StrList args;
+        sl_init(&args);
+        sl_push(&args, "--sync");
+        for (size_t i = 0; i < o->refresh_level; i++)
+            sl_push(&args, "--refresh");
+        sl_extend(&args, o->common);
+        int r = pacman_run(true, &args, NULL);
+        sl_free(&args);
+        if (r != 0)
+            return 1;
+    } else if (o->repo_download == 1) {
+        pacman_refresh_credentials();   /* the background sudo -n needs them */
+    }
+    RepoStep step;
+    memset(&step, 0, sizeof step);
+    step.o = o;
+    step.dl.pid = -1;
+    repo_step_start(&step);
+    int rc = aur_upgrade(o, &step);
+    if (repo_step_finish(&step) != 0)
+        rc = 1;
     return rc;
 }
 

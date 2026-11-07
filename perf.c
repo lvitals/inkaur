@@ -2,6 +2,7 @@
 #include "buf.h"
 #include "config.h"
 #include "fsutil.h"
+#include "mirrors.h"
 #include "pacman.h"
 #include "proc.h"
 #include "tty.h"
@@ -21,8 +22,24 @@ void perf_config_defaults(PerfConfig *c)
     c->parallel = -1;
     c->build_jobs = 0;
     c->fetch_jobs = 0;
-    c->prefetch = -1;
+    c->repo_download = -1;
+    c->mirrors = 0;
     c->speedtest = 1;
+}
+
+int perf_parse_repo_download(const char *s)
+{
+    if (s == NULL)
+        return -2;
+    if (strcmp(s, "auto") == 0)
+        return -1;
+    if (strcmp(s, "no") == 0)
+        return 0;
+    if (strcmp(s, "pacman") == 0)
+        return 1;
+    if (strcmp(s, "mirrors") == 0)
+        return 2;
+    return -2;
 }
 
 int perf_parse_jobs(const char *s)
@@ -84,8 +101,10 @@ int perf_config_parse(const char *text, const char *origin, PerfConfig *c)
         int t;
         if (strcmp(k, "Parallel") == 0 && (t = parse_tristate(v)) != -2) {
             c->parallel = t;
-        } else if (strcmp(k, "Prefetch") == 0 && (t = parse_tristate(v)) != -2) {
-            c->prefetch = t;
+        } else if (strcmp(k, "RepoDownload") == 0 && (t = perf_parse_repo_download(v)) != -2) {
+            c->repo_download = t;
+        } else if (strcmp(k, "Mirrors") == 0 && (t = perf_parse_jobs(v)) >= 0 && t <= 8) {
+            c->mirrors = t;
         } else if (strcmp(k, "BuildJobs") == 0 && (t = perf_parse_jobs(v)) >= 0) {
             c->build_jobs = t;
         } else if (strcmp(k, "FetchJobs") == 0 && (t = perf_parse_jobs(v)) >= 0) {
@@ -341,6 +360,7 @@ void perf_decide(const PerfConfig *c, const PerfFacts *f, bool chroot, PerfPlan 
     memset(out, 0, sizeof *out);
     if (c->parallel == 0) {
         out->build_jobs = out->fetch_jobs = 1;
+        out->mirrors = 1;
         snprintf(out->why, sizeof out->why, "serial: Parallel = no or --serial");
         return;
     }
@@ -349,7 +369,9 @@ void perf_decide(const PerfConfig *c, const PerfFacts *f, bool chroot, PerfPlan 
     if (chroot)
         out->build_jobs = 1;   /* one devtools chroot copy at a time */
     bool fast = !f->have_speed || f->bytes_per_sec >= 1024.0 * 1024.0;
-    out->prefetch = c->prefetch == 1 || (c->prefetch == -1 && out->fetch_jobs > 1 && fast);
+    out->repo_download = c->repo_download >= 0 ? c->repo_download
+                         : (out->fetch_jobs > 1 && fast) ? 1 : 0;
+    out->mirrors = c->mirrors > 0 ? c->mirrors : 3;
 
     char speed[64];
     if (f->have_speed) {
@@ -394,21 +416,25 @@ int cmd_speedtest(const char *cache, const char *pacman_config, const PerfConfig
            c->fetch_jobs ? "(configured)" : "(auto) concurrent git clone/fetch of AUR repos");
     printf("   build jobs  %-3d %s\n", plan.build_jobs,
            c->build_jobs ? "(configured)" : "(auto) concurrent AUR builds, dependency order kept");
-    printf("   prefetch    %-3s AUR repos fetched while pacman -Syu runs\n",
-           plan.prefetch ? "yes" : "no");
+    static const char *const rd[] = { "no", "pacman", "mirrors" };
+    printf("   repo dl     %-7s %s\n", rd[plan.repo_download],
+           plan.repo_download == 0 ? "(repository packages downloaded by pacman -Su itself)"
+           : plan.repo_download == 1 ? "(pacman -Suw in the background during AUR review)"
+                                     : "(inkaur splits the downloads across mirrors)");
     printf("   based on: %s\n", plan.why);
 
     if (f.have_speed) {
-        double kib = f.bytes_per_sec / 1024.0;
+        long want = recommended_parallel_downloads(f.bytes_per_sec);
         printf("\n%s:: Suggestions%s\n", C_BOLD, C_END);
-        if (kib < 256)
-            printf("   slow connection: consider 'Parallel = no' in inkaur.conf and\n"
-                   "   'ParallelDownloads = 1' or 2 in /etc/pacman.conf\n");
-        else if (pdn <= 1 && kib >= 1024)
-            printf("   fast connection: set 'ParallelDownloads = 5' in /etc/pacman.conf\n"
-                   "   so pacman also downloads in parallel\n");
-        else
-            printf("   current settings fit this connection\n");
+        if (f.bytes_per_sec < 256 * 1024)
+            printf("   slow connection: 'Parallel = no' in inkaur.conf (or --serial) keeps\n"
+                   "   inkaur from competing with pacman for the link\n");
+        printf("   pacman ParallelDownloads: %ld now, %ld fits this connection\n", pdn, want);
+        if (want != pdn)
+            pacman_conf_set_parallel(cache, pacman_config ? pacman_config : PACMAN_CONF_PATH,
+                                     want);
+        printf("   mirror ranking: 'inkaur --rankmirrors' tests %s and orders it\n",
+               MIRRORLIST_PATH);
     }
     if (rc == 0)
         printf("\nmeasurement saved; 'auto' uses it for %d days (SpeedTest = always\n"

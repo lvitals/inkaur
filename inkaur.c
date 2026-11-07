@@ -5,6 +5,7 @@
 #include "fsutil.h"
 #include "install.h"
 #include "pacman.h"
+#include "mirrors.h"
 #include "perf.h"
 #include "proc.h"
 #include "search.h"
@@ -37,6 +38,7 @@ static void usage_main(void)
          "    inkaur {-U --upgrade}  [options] <file(s)>\n"
          "    inkaur {-A --audit}    <directory>          (inkaur only)\n"
          "    inkaur --speedtest                          (inkaur only)\n"
+         "    inkaur --rankmirrors [--all] [--count <n>]  (inkaur only)\n"
          "\nevery pacman operation and option is accepted with the same letters and\n"
          "names. inkaur handles the AUR side and passes the rest to pacman unchanged.\n"
          "\nuse 'inkaur {-h --help}' with an operation for available options");
@@ -113,6 +115,12 @@ static void usage_sync(void)
          "      --serial         one thing at a time (slow or metered connections,\n"
          "                       slow computers)\n"
          "      --parallel       force parallel mode even if the config says no\n"
+         "      --repo-download <auto|pacman|mirrors|no>\n"
+         "                       -Syu: download repository packages in the background\n"
+         "                       while the AUR is reviewed (pacman -Suw), or split them\n"
+         "                       across several mirrors (inkaur; pacman still verifies\n"
+         "                       every signature); no = plain pacman -Syu first\n"
+         "      --mirrors <n>    mirrors per repository for --repo-download=mirrors\n"
          "                       'auto' accelerates by default and scales with CPUs,\n"
          "                       free RAM and the speed saved by 'inkaur --speedtest'\n"
          "  targets may be prefixed with a repository ('extra/pkg') or 'aur/'");
@@ -211,8 +219,20 @@ static void usage_speedtest(void)
          "    Parallel  = auto      # auto | yes | no\n"
          "    BuildJobs = auto      # auto | 1..64\n"
          "    FetchJobs = auto      # auto | 1..64\n"
-         "    Prefetch  = auto      # fetch AUR repos while pacman -Syu runs\n"
+         "    RepoDownload = auto   # auto | pacman | mirrors | no\n"
+         "    Mirrors   = auto      # mirrors per repo for RepoDownload = mirrors\n"
          "    SpeedTest = auto      # auto (use saved result) | always | never");
+}
+
+static void usage_rankmirrors(void)
+{
+    puts("usage:  inkaur --rankmirrors [--all] [--count <n>]\n"
+         "tests every Server in " MIRRORLIST_PATH " (downloads core.db, checks\n"
+         "how far behind each mirror is via its lastsync file) and ranks them.\n"
+         "With confirmation, the fastest up-to-date ones become active and the old\n"
+         "entries are kept as comments (backup: mirrorlist.inkaur-bak).\n"
+         "  --all          also test the commented (#Server) entries\n"
+         "  --count <n>    how many mirrors to activate (default 10)");
 }
 
 static void usage_audit(void)
@@ -457,7 +477,8 @@ static int op_sync(const Cli *c, Options *o, const char *home, const PerfConfig 
         return passthrough(c, false, NULL);
     }
     if (cli_has(c, "refresh") && !cli_has(c, "sysupgrade")) {
-        fputs("error: '-Sy' without '-u' would be a partial upgrade; use -Syu\n", stderr);
+        fputs("error: '-Sy' without '-u' would be a partial upgrade; use -Syu "
+              "(or -Syyu to force a refresh of every database)\n", stderr);
         return 1;
     }
     if (cli_has(c, "clean") && c->targets.n) {
@@ -512,7 +533,8 @@ static int op_sync(const Cli *c, Options *o, const char *home, const PerfConfig 
     sl_init(&fetched);
     o->fetch_jobs = plan.fetch_jobs;
     o->build_jobs = plan.build_jobs;
-    o->prefetch = plan.prefetch;
+    o->repo_download = plan.repo_download;
+    o->mirrors = plan.mirrors;
     o->fetched = &fetched;
     o->perf_note = plan.why;
 
@@ -639,6 +661,7 @@ int main(int argc, char **argv)
         case 'T': usage_deptest(); break;
         case 'A': usage_audit(); break;
         case 'N': usage_speedtest(); break;
+        case 'M': usage_rankmirrors(); break;
         default: usage_main(); break;
         }
         if (c.op == 0 && !c.help) {
@@ -674,6 +697,45 @@ int main(int argc, char **argv)
         pc.fetch_jobs = fj;
         if (c.parallel < 0 && ((c.jobs && bj != 1) || (c.fetch_jobs && fj != 1)))
             pc.parallel = 1;   /* explicit job counts win over 'Parallel = no' */
+    }
+    if (c.repo_download) {
+        int v = perf_parse_repo_download(c.repo_download);
+        if (v == -2) {
+            fputs("error: --repo-download takes auto, pacman, mirrors or no\n", stderr);
+            rc = 1;
+            goto done;
+        }
+        pc.repo_download = v;
+    }
+    if (c.mirrors) {
+        int v = perf_parse_jobs(c.mirrors);
+        if (v < 0 || v > 8) {
+            fputs("error: --mirrors takes auto or 1..8\n", stderr);
+            rc = 1;
+            goto done;
+        }
+        pc.mirrors = v;
+    }
+    pacman_set_config_path(c.config);
+    if (c.op == 'M') {
+        int count = c.count ? perf_parse_jobs(c.count) : 10;
+        if (count <= 0) {
+            fprintf(stderr, "error: --count takes 1..%d\n", PERF_MAX_JOBS);
+            rc = 1;
+            goto done;
+        }
+        char cache[PATH_BUF];
+        PerfFacts f;
+        PerfPlan plan;
+        if (setup_cache(home, cache, sizeof cache) != 0) {
+            rc = 1;
+            goto done;
+        }
+        perf_facts(cache, &f);
+        perf_decide(&pc, &f, false, &plan);
+        rc = cmd_rankmirrors(cache, cli_has(&c, "all"), count,
+                             plan.fetch_jobs < 4 ? 4 : plan.fetch_jobs, c.noconfirm);
+        goto done;
     }
     if (c.op == 'N') {
         char cache[PATH_BUF];

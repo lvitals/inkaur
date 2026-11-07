@@ -22,7 +22,10 @@ typedef struct {
     StrList *touched;      /* names this run (re)installed, for the change summary */
     int fetch_jobs;        /* concurrent git clone/fetch (1 = serial) */
     int build_jobs;        /* concurrent AUR builds (1 = serial) */
-    bool prefetch;         /* fetch AUR repos while pacman -Syu runs */
+    int repo_download;     /* 0 plain -Syu, 1 pacman -Suw in background, 2 multi-mirror */
+    int mirrors;           /* servers per repository for repo_download == 2 */
+    int (*before_builds)(void *ctx);  /* runs once, after the reviews, before building */
+    void *hook_ctx;
     StrList *fetched;      /* bases already fetched during this run */
     const char *perf_note; /* why these values were chosen, for display */
 } Options;

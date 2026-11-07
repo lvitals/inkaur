@@ -8,6 +8,7 @@
 enum {
     OP_D = 1u << 0, OP_F = 1u << 1, OP_Q = 1u << 2, OP_R = 1u << 3,
     OP_S = 1u << 4, OP_T = 1u << 5, OP_U = 1u << 6, OP_A = 1u << 7,
+    OP_M = 1u << 8,
     OP_PAC = OP_D | OP_F | OP_Q | OP_R | OP_S | OP_T | OP_U,
     OP_XACT = OP_R | OP_S | OP_U,
     OP_UPG = OP_S | OP_U
@@ -32,7 +33,7 @@ static const OptDef OPTS[] = {
     { "verbose", 'v', OP_PAC, false, K_COMMON, false },
     { "arch", 0, OP_PAC, true, K_COMMON, true },
     { "cachedir", 0, OP_PAC, true, K_COMMON, false },
-    { "color", 0, OP_PAC | OP_A, true, K_COMMON, false },
+    { "color", 0, OP_PAC | OP_A | OP_M, true, K_COMMON, false },
     { "config", 0, OP_PAC, true, K_COMMON, true },
     { "debug", 0, OP_PAC, false, K_COMMON, false },
     { "gpgdir", 0, OP_PAC, true, K_COMMON, false },
@@ -97,13 +98,17 @@ static const OptDef OPTS[] = {
     { "fetch-jobs", 0, OP_S, true, K_LOCAL, false },
     { "serial", 0, OP_S, false, K_LOCAL, false },
     { "parallel", 0, OP_S, false, K_LOCAL, false },
+    { "repo-download", 0, OP_S, true, K_LOCAL, false },
+    { "mirrors", 0, OP_S, true, K_LOCAL, false },
+    { "all", 0, OP_M, false, K_LOCAL, false },
+    { "count", 0, OP_M, true, K_LOCAL, false },
 };
 #define NOPTS (sizeof OPTS / sizeof OPTS[0])
 
 static const struct { char op; const char *name; } OPS[] = {
     { 'D', "database" }, { 'F', "files" }, { 'Q', "query" }, { 'R', "remove" },
     { 'S', "sync" }, { 'T', "deptest" }, { 'U', "upgrade" }, { 'V', "version" },
-    { 'A', "audit" }, { 'N', "speedtest" },
+    { 'A', "audit" }, { 'N', "speedtest" }, { 'M', "rankmirrors" },
 };
 #define NOPS (sizeof OPS / sizeof OPS[0])
 
@@ -126,6 +131,7 @@ static unsigned op_bit(char op)
     case 'T': return OP_T;
     case 'U': return OP_U;
     case 'A': return OP_A;
+    case 'M': return OP_M;
     default:  return 0;
     }
 }
@@ -258,6 +264,9 @@ static void apply(Cli *c, const OptDef *d, const char *val)
     else if (strcmp(d->lng, "fetch-jobs") == 0) c->fetch_jobs = val;
     else if (strcmp(d->lng, "serial") == 0) c->parallel = 0;
     else if (strcmp(d->lng, "parallel") == 0) c->parallel = 1;
+    else if (strcmp(d->lng, "repo-download") == 0) c->repo_download = val;
+    else if (strcmp(d->lng, "mirrors") == 0) c->mirrors = val;
+    else if (strcmp(d->lng, "count") == 0) c->count = val;
     else if (strcmp(d->lng, "config") == 0) c->config = val;
     else if (strcmp(d->lng, "ignore") == 0) split_ignore(c, val);
     else if (strcmp(d->lng, "color") == 0)
@@ -281,7 +290,7 @@ static int find_op(Cli *c, int argc, char **argv, char *err, size_t errsz)
             if (got == 0) {
                 /* skip the value of a separate-argument long option */
                 bool amb;
-                const OptDef *d = find_long(l, len, OP_PAC | OP_A, &amb);
+                const OptDef *d = find_long(l, len, OP_PAC | OP_A | OP_M, &amb);
                 if (d && d->arg && l[len] != '=')
                     i++;
                 continue;
@@ -322,7 +331,7 @@ int cli_parse(Cli *c, int argc, char **argv, char *err, size_t errsz)
         return -1;
     unsigned opbit = op_bit(c->op);
     if (c->op == 0 || c->op == 'V' || c->op == 'N')
-        opbit = OP_PAC | OP_A;   /* accept anything; only help/version are used */
+        opbit = OP_PAC | OP_A | OP_M;   /* accept anything; only help/version are used */
 
     bool end_opts = false;
     for (int i = 1; i < argc; i++) {

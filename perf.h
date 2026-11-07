@@ -8,7 +8,8 @@
 /*
  * Parallelism settings: how many AUR repositories are cloned/fetched at once,
  * how many AUR packages are built at once (dependency order is always kept),
- * and whether AUR repositories are prefetched while pacman -Syu runs.
+ * and how repository packages are downloaded in the background while the AUR
+ * side is reviewed (by pacman -Suw, or by inkaur across several mirrors).
  *
  * Sources, later ones win: built-in defaults, /etc/inkaur.conf,
  * ~/.config/inkaur/inkaur.conf ($XDG_CONFIG_HOME), command line.
@@ -17,7 +18,8 @@
  *   Parallel  = auto | yes | no     # no: everything one at a time
  *   BuildJobs = auto | 1..64
  *   FetchJobs = auto | 1..64
- *   Prefetch  = auto | yes | no
+ *   RepoDownload = auto | pacman | mirrors | no
+ *   Mirrors   = auto | 1..8          # servers used by RepoDownload = mirrors
  *   SpeedTest = auto | always | never
  *
  * "auto" accelerates by default and scales down on few CPUs, little free
@@ -28,7 +30,8 @@ typedef struct {
     int parallel;     /* -1 auto, 0 no, 1 yes */
     int build_jobs;   /* 0 = auto */
     int fetch_jobs;   /* 0 = auto */
-    int prefetch;     /* -1 auto, 0 no, 1 yes */
+    int repo_download;/* -1 auto, 0 no, 1 pacman, 2 mirrors */
+    int mirrors;      /* 0 = auto (3) */
     int speedtest;    /* 0 never, 1 auto (use saved result), 2 always (measure each -Su) */
 } PerfConfig;
 
@@ -44,7 +47,8 @@ typedef struct {
 typedef struct {
     int build_jobs;
     int fetch_jobs;
-    bool prefetch;
+    int repo_download;   /* 0 no, 1 pacman -Suw in background, 2 inkaur multi-mirror */
+    int mirrors;
     char why[256];
 } PerfPlan;
 
@@ -70,7 +74,10 @@ int perf_save_speed(const char *cache, const PerfFacts *f);
 
 void perf_decide(const PerfConfig *c, const PerfFacts *f, bool chroot, PerfPlan *out);
 
-/* inkaur --speedtest */
+/* "auto|no|pacman|mirrors" -> -1/0/1/2, or -2 if invalid. */
+int perf_parse_repo_download(const char *s);
+
+/* inkaur --speedtest (offers to apply ParallelDownloads to pacman.conf) */
 int cmd_speedtest(const char *cache, const char *pacman_config, const PerfConfig *c);
 
 #endif /* PERF_H */
