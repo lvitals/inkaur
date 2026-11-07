@@ -4,16 +4,37 @@
   <img src="mascot.svg" width="160" alt="inkaur mascot: an ink-drop ghost">
 </p>
 
-A small AUR helper written in C99 with a `pacman`-like interface. It is built
-around one rule: **nothing from the AUR is built until a human has reviewed the
-exact commit that will be built.**
+**inkaur** is a security-first AUR helper and a complete front-end for
+pacman. Its goal is to make installing and updating software from the Arch
+User Repository as safe as installing from the official repositories, without
+changing the way you already work with pacman.
 
-Its mascot, shown above, is an original ink-drop ghost. It is stored in the
-binary as a 16x16 pixel map (`mascot.c`, no image file); `mascot.svg` is
-generated from that same map with `make mascot.svg`. On a terminal,
-`inkaur --version` draws it in color and adapts the layout to the width:
-text beside the mascot, below it, or alone on very narrow terminals. Piped
-output stays plain text.
+The AUR is open to everyone, so a package build script can do anything on
+your machine. inkaur is built around one rule: **nothing from the AUR is
+built until a human has reviewed the exact commit that will be built.** Every
+AUR package, including every AUR dependency, is checked out at a fixed git
+commit and run through a static security audit. The full source is shown for
+review before anything is compiled. On updates, only what changed since your
+last approval is shown. After the build, the package contents are audited
+again before installation, and every decision is logged.
+
+It also aims to be a drop-in replacement for pacman. It accepts the same
+operations and options, handles the AUR side itself, and passes everything
+else to pacman unchanged. After every update or installation it prints a
+summary of what changed: packages upgraded, installed, reinstalled,
+downgraded and removed.
+
+Updates are fast without giving up safety. AUR repositories are fetched in
+parallel. AUR packages are built in parallel, always in dependency order.
+Repository packages are downloaded in the background while you review the
+AUR changes. The level of parallelism adapts to the machine and to the
+measured connection speed, so it can speed up a fast system and stay gentle
+on slow or metered links and modest computers. inkaur can also rank your
+pacman mirrors by speed and freshness, and tune pacman's parallel downloads
+to your connection.
+
+inkaur is written in C99 and links only against the C library: no
+third-party libraries, and no shell is ever used to run commands.
 
 ## Dependencies
 
@@ -262,6 +283,13 @@ The audit is a reading aid with hard stops, not a verdict. Read `PKGBUILD` and
 * The cache (`~/.cache/inkaur`, mode 0700) is checked for owner and symlinks
   and is locked against concurrent runs. Deletion never follows symlinks or
   crosses mount points. The pager runs with `LESSSECURE=1`.
+
+## Mascot
+
+The mascot at the top is an original ink-drop ghost. The binary stores it as
+a 16x16 pixel map in `mascot.c`, with no image file, and `--version` draws it
+in color on a terminal. `mascot.svg` is generated from the same map with
+`make mascot.svg`.
 
 ## License
 
