@@ -77,8 +77,13 @@ install:
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/inkaur
 
+# README image, generated from the pixel map in mascot.c (the binary has no image).
+mascot.svg: tools/mascot-svg.c mascot.o tty.o buf.o alloc.o
+	$(CC) $(CFLAGS_ALL) -I. tools/mascot-svg.c mascot.o tty.o buf.o alloc.o $(LDFLAGS_ALL) -o tools/mascot-svg
+	./tools/mascot-svg > $@
+
 clean:
-	rm -rf *.o *.d inkaur build-test tests/run_tests
+	rm -rf *.o *.d inkaur build-test tests/run_tests tools/mascot-svg
 
 -include $(OBJ:.o=.d) inkaur.d $(TEST_OBJ:.o=.d)
 

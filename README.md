@@ -1,22 +1,16 @@
 # inkaur
 
-```
-    ▄▄████▄▄
-  ▄██████████▄
- ▄██▀   █▀   █▄
- ███▄ ███▄ ████
- ██████████████
- ██████████████
- █▀ ▀███▀ ▀██▀
-      █     ▀
-```
+<p align="center">
+  <img src="mascot.svg" width="160" alt="inkaur mascot: an ink-drop ghost">
+</p>
 
 A small AUR helper written in C99 with a `pacman`-like interface. It is built
 around one rule: **nothing from the AUR is built until a human has reviewed the
 exact commit that will be built.**
 
 Its mascot, shown above, is an original ink-drop ghost. It is stored in the
-binary as a 16x16 pixel map (`mascot.c`, no image file). On a terminal,
+binary as a 16x16 pixel map (`mascot.c`, no image file); `mascot.svg` is
+generated from that same map with `make mascot.svg`. On a terminal,
 `inkaur --version` draws it in color and adapts the layout to the width:
 text beside the mascot, below it, or alone on very narrow terminals. Piped
 output stays plain text.

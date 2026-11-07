@@ -34,6 +34,40 @@ static const char *const ART[] = {
 #define ART_W 16
 #define ART_H 16
 
+/* Same colors as the terminal palette below, for the SVG. */
+static const char *hex_of(char c)
+{
+    switch (c) {
+    case 'B': return "#5f5fd7";
+    case 'L': return "#87afff";
+    case 'D': return "#5f00af";
+    case 'W': return "#eeeeee";
+    case 'P': return "#00005f";
+    default:  return NULL;
+    }
+}
+
+void mascot_write_svg(FILE *fp, unsigned scale)
+{
+    fprintf(fp, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%u\" height=\"%u\" "
+                "viewBox=\"0 0 %d %d\" shape-rendering=\"crispEdges\">\n"
+                "<title>inkaur mascot</title>\n",
+            scale * ART_W, scale * ART_H, ART_W, ART_H);
+    for (int y = 0; y < ART_H; y++) {
+        for (int x = 0; x < ART_W;) {   /* one rect per run of equal pixels */
+            const char *col = hex_of(ART[y][x]);
+            int run = 1;
+            while (x + run < ART_W && ART[y][x + run] == ART[y][x])
+                run++;
+            if (col)
+                fprintf(fp, "<rect x=\"%d\" y=\"%d\" width=\"%d\" height=\"1\" fill=\"%s\"/>\n",
+                        x, y, run, col);
+            x += run;
+        }
+    }
+    fputs("</svg>\n", fp);
+}
+
 /* xterm 256-color palette indexes */
 static int color_of(char c)
 {

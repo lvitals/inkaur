@@ -2,6 +2,7 @@
 #define MASCOT_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 /*
  * The inkaur mascot: an original ink-drop ghost (16x16 pixels), stored as a
@@ -16,5 +17,9 @@
  * parse --version are not affected.
  */
 void mascot_print(const char *title, const char *const *lines, size_t nlines);
+
+/* The same pixel map as an SVG (each pixel scale x scale), for the README.
+ * Generated with `make mascot.svg`. */
+void mascot_write_svg(FILE *fp, unsigned scale);
 
 #endif /* MASCOT_H */
