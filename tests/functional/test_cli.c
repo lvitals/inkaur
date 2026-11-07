@@ -29,6 +29,42 @@ void run_cli_tests(void)
     ASSERT(run("./inkaur -V --color always", out, sizeof out) == 0 &&
            strstr(out, "\xe2\x96\x80") && strstr(out, "inkaur 0.3.0"),
            "-V --color always draws the mascot");
+    /* responsive layout: beside, below, or text only */
+    ASSERT(run("COLUMNS=100 ./inkaur -V --color always", out, sizeof out) == 0, "-V wide");
+    {
+        char *t = strstr(out, "\033[1minkaur 0.3.0");
+        char *bol = t;
+        while (bol && bol > out && bol[-1] != '\n')
+            bol--;
+        bool beside = false;
+        for (char *q = bol; t && q < t; q++)
+            if ((unsigned char)q[0] == 0xe2 && (unsigned char)q[1] == 0x96)
+                beside = true;
+        ASSERT(beside, "wide: title on the same line as the mascot");
+    }
+    ASSERT(run("COLUMNS=50 ./inkaur -V --color always", out, sizeof out) == 0 &&
+           strstr(out, "\n\033[1minkaur 0.3.0") && strstr(out, "\xe2\x96\x80"),
+           "medium: text below the mascot");
+    ASSERT(run("COLUMNS=12 ./inkaur -V --color always", out, sizeof out) == 0 &&
+           strstr(out, "\xe2\x96") == NULL && strstr(out, "inkaur 0.3.0"),
+           "narrow: text only");
+    {
+        bool fits = true;
+        run("COLUMNS=50 ./inkaur -V --color always | sed 's/\x1b\\[[0-9;]*m//g'", out,
+            sizeof out);
+        for (char *l = out; *l; ) {
+            char *e = strchr(l, '\n');
+            size_t n = e ? (size_t)(e - l) : strlen(l), w = 0;
+            for (size_t k = 0; k < n; k++)
+                w += ((unsigned char)l[k] & 0xC0) != 0x80;   /* count UTF-8 code points */
+            if (w > 50)
+                fits = false;
+            if (!e)
+                break;
+            l = e + 1;
+        }
+        ASSERT(fits, "medium: no line wider than the terminal");
+    }
 
     ASSERT(run("./inkaur -h", out, sizeof out) == 0 && strstr(out, "usage:  inkaur"), "-h");
     ASSERT(run("./inkaur -Sh", out, sizeof out) == 0 && strstr(out, "--chroot"), "-Sh");
