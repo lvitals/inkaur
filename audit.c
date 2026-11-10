@@ -215,6 +215,18 @@ static const struct {
     { "sysctl", "changes operating system settings" },
     { "/usr/local", "installs into /usr/local, which is reserved for your own manual installs" },
     { "'..' path", "tries to write files outside the normal places" },
+    /* installed packages (inkaur --integrity) */
+    { "content changed since installation", "a file is different from the one the package installed" },
+    { "permissions or owner changed since installation", "who may run or change a file is different from what the package installed" },
+    { "symlink target changed since installation", "a link now points somewhere else than when it was installed" },
+    { "file missing since installation", "a file the package installed was deleted" },
+    { "file differs from the installed version", "a file does not match what the package installed" },
+    { "configuration file edited since installation", "a settings file was changed after installation; usually by you or by the program itself (normal)" },
+    { "not readable without root", "only the administrator can read this file, so it was not compared" },
+    { "modification time changed since installation", "a file's date changed, but its content is the same" },
+    { "differs from the version inkaur checked", "this version was installed without inkaur's checks (makepkg, pacman -U or another helper)" },
+    { "not found in the AUR", "the package is no longer in the AUR (deleted or renamed; AUR packages are sometimes deleted for being malicious) and will get no updates" },
+    { "update available in the AUR", "a newer version exists in the AUR (inkaur -Syu)" },
     /* AUR trust signals */
     { "new package with", "this package is very new and nobody has voted for it yet; recent AUR malware looked exactly like this" },
     { "few votes", "few people use this package, so problems are less likely to have been noticed" },

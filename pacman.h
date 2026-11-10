@@ -38,6 +38,10 @@ int pacman_run(bool as_root, const StrList *args, const StrList *targets);
 /* true once pacman_run() has started pacman as root. */
 bool pacman_ran_as_root(void);
 
+/* pacman -Qkk -- names (LC_ALL=C), stdout and stderr captured together.
+ * Returns 0 if pacman ran (altered files are not an error), -1 otherwise. */
+int pacman_check_files(const StrList *names, StrBuf *out);
+
 /* Quiet non-root pacman run capturing stdout: pacman <context> <args...>. */
 int pacman_capture(const StrList *args, StrBuf *out);
 

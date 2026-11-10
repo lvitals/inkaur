@@ -8,7 +8,7 @@
 enum {
     OP_D = 1u << 0, OP_F = 1u << 1, OP_Q = 1u << 2, OP_R = 1u << 3,
     OP_S = 1u << 4, OP_T = 1u << 5, OP_U = 1u << 6, OP_A = 1u << 7,
-    OP_M = 1u << 8,
+    OP_M = 1u << 8, OP_I = 1u << 9,
     OP_PAC = OP_D | OP_F | OP_Q | OP_R | OP_S | OP_T | OP_U,
     OP_XACT = OP_R | OP_S | OP_U,
     OP_UPG = OP_S | OP_U
@@ -33,7 +33,7 @@ static const OptDef OPTS[] = {
     { "verbose", 'v', OP_PAC, false, K_COMMON, false },
     { "arch", 0, OP_PAC, true, K_COMMON, true },
     { "cachedir", 0, OP_PAC, true, K_COMMON, false },
-    { "color", 0, OP_PAC | OP_A | OP_M, true, K_COMMON, false },
+    { "color", 0, OP_PAC | OP_A | OP_M | OP_I, true, K_COMMON, false },
     { "config", 0, OP_PAC, true, K_COMMON, true },
     { "debug", 0, OP_PAC, false, K_COMMON, false },
     { "gpgdir", 0, OP_PAC, true, K_COMMON, false },
@@ -109,7 +109,7 @@ static const OptDef OPTS[] = {
 static const struct { char op; const char *name; } OPS[] = {
     { 'D', "database" }, { 'F', "files" }, { 'Q', "query" }, { 'R', "remove" },
     { 'S', "sync" }, { 'T', "deptest" }, { 'U', "upgrade" }, { 'V', "version" },
-    { 'A', "audit" }, { 'N', "speedtest" }, { 'M', "rankmirrors" },
+    { 'A', "audit" }, { 'N', "speedtest" }, { 'M', "rankmirrors" }, { 'I', "integrity" },
 };
 #define NOPS (sizeof OPS / sizeof OPS[0])
 
@@ -133,6 +133,7 @@ static unsigned op_bit(char op)
     case 'U': return OP_U;
     case 'A': return OP_A;
     case 'M': return OP_M;
+    case 'I': return OP_I;
     default:  return 0;
     }
 }

@@ -56,6 +56,14 @@ static char **build_env(const char *const *extra)
         const char *v = getenv(env_allow[i]);
         if (v == NULL)
             continue;
+        /* a value given in extra wins (e.g. LC_ALL=C for parseable output) */
+        size_t kl = strlen(env_allow[i]);
+        bool overridden = false;
+        for (size_t j = 0; extra && extra[j]; j++)
+            if (strncmp(extra[j], env_allow[i], kl) == 0 && extra[j][kl] == '=')
+                overridden = true;
+        if (overridden)
+            continue;
         if (n + 2 >= cap) {
             cap *= 2;
             env = xreallocarray(env, cap, sizeof(char *));
@@ -182,6 +190,8 @@ int proc_run(const char *const argv[], const ProcOpts *opts)
             if (dup2(pipefd[1], STDOUT_FILENO) < 0)
                 _exit(126);
             close(pipefd[1]);
+            if (opts->stderr_to_capture && dup2(STDOUT_FILENO, STDERR_FILENO) < 0)
+                _exit(126);
         } else if (opts->stdout_null && redirect_null(STDOUT_FILENO, O_WRONLY) != 0) {
             _exit(126);
         }

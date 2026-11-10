@@ -1,4 +1,5 @@
 #include "install.h"
+#include "integrity.h"
 #include "alloc.h"
 #include "audit.h"
 #include "config.h"
@@ -46,6 +47,7 @@ typedef struct {
     SrcInfo si;
     StrList built;         /* staged package files to install (private copies) */
     StrList sha;           /* SHA-256 of each built[] file, taken when it was staged */
+    StrList built_names;   /* pkgname of each built[] file */
     AurMeta meta;          /* AUR trust signals */
     bool running;          /* parallel build in progress */
     pid_t pid;
@@ -78,6 +80,7 @@ static void node_free(Node *n)
     sl_free(&n->aliases);
     sl_free(&n->built);
     sl_free(&n->sha);
+    sl_free(&n->built_names);
     srcinfo_free(&n->si);
 }
 
@@ -417,6 +420,7 @@ static int resolve(Plan *p, const char *depstr, bool explicit, int depth)
     sl_init(&n.aliases);
     sl_init(&n.built);
     sl_init(&n.sha);
+    sl_init(&n.built_names);
     sl_push(&n.want, pkg->name);
     n.meta.known = true;
     n.meta.votes = pkg->votes;
@@ -649,6 +653,7 @@ static int build_collect(Plan *p, Node *n)
     }
     sl_free(&n->built);
     sl_free(&n->sha);
+    sl_free(&n->built_names);
     StrList names;
     sl_init(&names);
     for (size_t i = 0; i < files.n; i++) {
@@ -667,6 +672,7 @@ static int build_collect(Plan *p, Node *n)
             sl_push(&n->built, dst);
             sl_push(&n->sha, hex);
             sl_push(&names, pn);
+            sl_push(&n->built_names, pn);
         }
         free(pn);
     }
@@ -790,9 +796,26 @@ static int install_node(const Options *o, const Node *n)
     int rc = pacman_run(true, &args, &n->built);
     sl_free(&args);
     if (rc == 0) {
-        for (size_t i = 0; i < n->built.n; i++)
+        for (size_t i = 0; i < n->built.n; i++) {
             syslog(LOG_AUTHPRIV | LOG_NOTICE, "installed pkgbase=%s commit=%s file=%s sha256=%s",
                    n->base, n->commit, strrchr(n->built.v[i], '/') + 1, n->sha.v[i]);
+            /* record for inkaur --integrity */
+            InstallRecord rec;
+            memset(&rec, 0, sizeof rec);
+            char *ver = i < n->built_names.n ? pacman_installed_version(n->built_names.v[i]) : NULL;
+            if (ver) {
+                snprintf(rec.name, sizeof rec.name, "%s", n->built_names.v[i]);
+                snprintf(rec.base, sizeof rec.base, "%s", n->base);
+                snprintf(rec.version, sizeof rec.version, "%s", ver);
+                snprintf(rec.commit, sizeof rec.commit, "%s", n->commit);
+                snprintf(rec.sha256, sizeof rec.sha256, "%s", n->sha.v[i]);
+                rec.installed = (long)time(NULL);
+                if (integrity_record(&rec) != 0)
+                    fprintf(stderr, "warning: could not save the install record of %s\n",
+                            rec.name);
+            }
+            free(ver);
+        }
         for (size_t i = 0; o->touched && i < n->want.n; i++)
             sl_push_unique(o->touched, n->want.v[i]);
     }

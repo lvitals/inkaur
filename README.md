@@ -82,6 +82,7 @@ inkaur -Qu               # pending updates, repositories and AUR
 inkaur -Q --aur          # foreign packages (same as -Qm; --repo = -Qn)
 inkaur -Sc / -Scc        # pacman cache cleanup + AUR build files / all clones
 inkaur -A <dir>          # audit of a local PKGBUILD dir, explained (exit 0..3 = severity)
+inkaur --integrity [pkg...]     # check the installed AUR packages (exit 0..3 = severity)
 inkaur -S --review=full pkg     # open the code in the pager right away
 inkaur -Qi / -Ql / -Qo / -R / -U / -D / -F / -T ...   # passed to pacman as is
 ```
@@ -187,6 +188,36 @@ Mirrors   = auto     # mirrors per repository for RepoDownload = mirrors (1..8)
 SpeedTest = auto     # auto (use the saved result) | always (measure before -Su) | never
 Review    = simple   # simple (safety summary, code with [v]) | full (code opens right away)
 ```
+
+### Integrity of installed AUR packages
+
+`inkaur --integrity` checks every installed AUR (foreign) package, or only
+the ones you name, and explains the result in plain words:
+
+* **Files.** Every installed file is compared with the checksum, size,
+  permissions and owner recorded when it was installed (`pacman -Qkk`). A
+  changed program is a *problem*, a deleted file is *to check*, and an edited
+  configuration file is only a note. Files only root can read are listed as
+  not checked.
+* **Origin.** Every package inkaur installs is recorded (version, reviewed
+  AUR commit, SHA-256 of the package file) in
+  `~/.local/share/inkaur/installed/`. If the installed version is not the one
+  inkaur checked, it was installed some other way (makepkg, `pacman -U`,
+  another helper).
+* **AUR.** Packages deleted from the AUR (sometimes removed for being
+  malicious, and never updated again), orphaned, flagged out of date, or with
+  an update available.
+
+```
+   ok      downgrade                12.0.4-1
+   PROBLEM networkmanager-snx       9dce681-1
+   !  a file is different from the one the package installed
+        (/usr/bin/nm-snx-discover, and 3 more places)
+
+:: Summary: 39 ok, 1 to check, 2 with problems, 0 dangerous
+```
+
+The exit status is the highest severity (0..3), so it can run from a timer.
 
 ### Repository downloads and mirrors
 

@@ -24,6 +24,7 @@ typedef struct {
     bool stdin_null;
     bool stdout_null;
     bool stderr_null;
+    bool stderr_to_capture;        /* with capture: stderr goes there too */
     const char *const *extra_env;  /* NULL-terminated "KEY=VALUE" list */
 } ProcOpts;
 

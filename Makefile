@@ -28,14 +28,14 @@ LDFLAGS_ALL = $(LDHARDEN) $(EXTRA_LDFLAGS)
 
 SRC  = alloc.c buf.c cli.c validate.c proc.c fsutil.c json.c net.c rpc.c srcinfo.c \
        vercmp.c pacman.c git.c audit.c review.c tty.c install.c search.c perf.c mirrors.c mascot.c \
-       sha256.c
+       sha256.c integrity.c
 OBJ  = $(SRC:.c=.o)
 
 TEST_SRC = tests/main.c tests/unit/test_validate.c tests/unit/test_json.c \
            tests/unit/test_vercmp.c tests/unit/test_srcinfo.c \
            tests/unit/test_audit.c tests/unit/test_buf.c \
            tests/unit/test_cli.c tests/unit/test_perf.c \
-           tests/unit/test_mirrors.c tests/unit/test_sha256.c \
+           tests/unit/test_mirrors.c tests/unit/test_sha256.c tests/unit/test_integrity.c \
            tests/functional/test_cli.c
 SAN      = -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined \
            -fno-sanitize-recover=all

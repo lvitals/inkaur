@@ -21,7 +21,8 @@
  */
 
 typedef struct {
-    char op;               /* D F Q R S T U V A, N (--speedtest), M (--rankmirrors), or 0 */
+    char op;               /* D F Q R S T U V A, N (--speedtest), M (--rankmirrors),
+                              I (--integrity), or 0 */
     bool help;
     StrList seen;          /* long name of every option given (repeats kept) */
     StrList common;        /* forwarded: options valid for every operation */

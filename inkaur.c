@@ -4,6 +4,7 @@
 #include "config.h"
 #include "fsutil.h"
 #include "install.h"
+#include "integrity.h"
 #include "mascot.h"
 #include "pacman.h"
 #include "mirrors.h"
@@ -40,6 +41,7 @@ static void usage_main(void)
          "    inkaur {-A --audit}    <directory>          (inkaur only)\n"
          "    inkaur --speedtest                          (inkaur only)\n"
          "    inkaur --rankmirrors [--all] [--count <n>]  (inkaur only)\n"
+         "    inkaur --integrity [package(s)]             (inkaur only)\n"
          "\nevery pacman operation and option is accepted with the same letters and\n"
          "names. inkaur handles the AUR side and passes the rest to pacman unchanged.\n"
          "\nuse 'inkaur {-h --help}' with an operation for available options");
@@ -242,6 +244,20 @@ static void usage_rankmirrors(void)
          "  --count <n>    how many mirrors to activate (default 10)");
 }
 
+static void usage_integrity(void)
+{
+    puts("usage:  inkaur --integrity [package(s)]\n"
+         "checks the installed AUR (foreign) packages, or only the ones given:\n"
+         "  - files: every installed file is compared with the checksum, size,\n"
+         "    permissions and owner recorded at installation (pacman -Qkk)\n"
+         "  - origin: the installed version must be the one inkaur checked and\n"
+         "    installed (records in ~/.local/share/inkaur/installed)\n"
+         "  - AUR: deleted from the AUR, orphaned, out of date, update available\n"
+         "results are explained in plain words. Run it as your user; files only\n"
+         "root can read are reported as not checked.\n"
+         "exit status: 0 ok/notes, 1 something to check, 2 problems, 3 danger, 4 error");
+}
+
 static void usage_audit(void)
 {
     puts("usage:  inkaur {-A --audit} <directory>\n"
@@ -260,6 +276,7 @@ static void version(void)
         "- every pacman option; summary of changes after updates",
         "- parallel fetches and builds in dependency order",
         "- mirror ranking (--rankmirrors), speed test (--speedtest)",
+        "- integrity check of installed AUR packages (--integrity)",
         "Copyright (C) 2026 Leandro V. Catarin - MIT License",
         "built without third-party libraries (C99 + POSIX libc only)",
     };
@@ -648,6 +665,7 @@ int main(int argc, char **argv)
     char *home = xstrdup(pw->pw_dir);
     char *user = xstrdup(pw->pw_name);
     proc_set_identity(home, user);
+    integrity_set_home(home);
     openlog("inkaur", LOG_PID, LOG_AUTHPRIV);
 
     Cli c;
@@ -679,11 +697,23 @@ int main(int argc, char **argv)
         case 'A': usage_audit(); break;
         case 'N': usage_speedtest(); break;
         case 'M': usage_rankmirrors(); break;
+        case 'I': usage_integrity(); break;
         default: usage_main(); break;
         }
         if (c.op == 0 && !c.help) {
             fputs("error: no operation specified (use -h for help)\n", stderr);
             rc = 1;
+        }
+        goto done;
+    }
+    if (c.op == 'I') {
+        if (c.seen.n != cli_count(&c, "color")) {
+            usage_integrity();
+            rc = 4;
+        } else if (c.targets.n && !targets_are_names(&c.targets, false)) {
+            rc = 4;
+        } else {
+            rc = cmd_integrity(&c.targets);
         }
         goto done;
     }

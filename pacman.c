@@ -187,6 +187,23 @@ int pacman_installed_names(StrList *out)
     return rc == 0 ? 0 : -1;
 }
 
+int pacman_check_files(const StrList *names, StrBuf *out)
+{
+    const char *head[] = { "-Qkk", NULL };
+    const char **argv = build_argv(NULL, head, NULL, names);
+    static const char *const env[] = { "LC_ALL=C", NULL };
+    ProcOpts o;
+    memset(&o, 0, sizeof o);
+    o.stdin_null = true;
+    o.capture = out;
+    o.stderr_to_capture = true;
+    o.extra_env = env;
+    int rc = proc_run(argv, &o);
+    free(argv);
+    /* 0: nothing altered, 1: something altered; anything else is a failure */
+    return (rc == 0 || rc == 1) && out->len > 0 ? 0 : -1;
+}
+
 int pacman_capture(const StrList *args, StrBuf *out)
 {
     const char **argv = build_argv(NULL, NULL, args, NULL);
