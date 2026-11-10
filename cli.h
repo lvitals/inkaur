@@ -16,8 +16,8 @@
  * ("--dbpath=/path") so values can never be read as options by pacman.
  *
  * inkaur-only additions: the -A/--audit and --speedtest operations and, for
- * -S/-Q, --aur, --repo, --chroot <dir>, --jobs, --fetch-jobs, --serial and
- * --parallel.
+ * -S/-Q, --aur, --repo, --chroot <dir>, --jobs, --fetch-jobs, --serial,
+ * --parallel and --review <simple|full>.
  */
 
 typedef struct {
@@ -40,6 +40,7 @@ typedef struct {
     const char *repo_download; /* --repo-download value, or NULL */
     const char *mirrors;   /* --mirrors value, or NULL */
     const char *count;     /* --rankmirrors --count value, or NULL */
+    const char *review;    /* --review value (simple|full), or NULL */
 } Cli;
 
 void cli_init(Cli *c);

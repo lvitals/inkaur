@@ -45,6 +45,9 @@ pid_t proc_spawn(const char *const argv[], const ProcOpts *opts, int log_fd);
  * meanwhile are remembered for proc_wait_pid(), so independent background
  * work is never lost. Returns the pid (status in *rc), or -1. */
 pid_t proc_wait_set(const pid_t *set, size_t n, int *rc);
+/* Same, but gives up after timeout_ms and returns 0 (so callers can show
+ * progress while children run). */
+pid_t proc_wait_set_timeout(const pid_t *set, size_t n, int *rc, int timeout_ms);
 /* Wait for one specific child; returns its status or -1. */
 int proc_wait_pid(pid_t pid);
 /* true if the child has already exited (it is then reaped and remembered). */

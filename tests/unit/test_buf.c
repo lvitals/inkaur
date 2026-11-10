@@ -37,7 +37,7 @@ void run_tty_tests(void)
     FILE *f = freopen("/dev/null", "r", stdin);
     ASSERT(f != NULL, "reopen stdin");
     ASSERT(!ask_approval("approve?"), "approval refused without a tty");
-    ASSERT(ask_decision("pkg", "build?", SEV_INFO, true, true) == DEC_ABORT,
+    ASSERT(ask_decision("pkg", "build?", SEV_INFO, true, "view") == DEC_ABORT,
            "package decision aborts without a tty");
     ASSERT(ask_yesno("q?", true, true), "noconfirm answers non-security prompts");
     printf("tty: ok\n");

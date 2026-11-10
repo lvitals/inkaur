@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -344,6 +345,37 @@ pid_t proc_wait_set(const pid_t *set, size_t n, int *rc)
                 return w;
             }
         remember(w, r);
+    }
+}
+
+pid_t proc_wait_set_timeout(const pid_t *set, size_t n, int *rc, int timeout_ms)
+{
+    for (size_t i = 0; i < n; i++)
+        if (set[i] > 0 && take_reaped(set[i], rc))
+            return set[i];
+    struct timespec step = { 0, 100 * 1000 * 1000 };   /* 100 ms */
+    for (int waited = 0;; waited += 100) {
+        int status = 0;
+        pid_t w = waitpid(-1, &status, WNOHANG);
+        if (w < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (w > 0) {
+            int r = decode_status(status);
+            for (size_t i = 0; i < n; i++)
+                if (set[i] == w) {
+                    if (rc)
+                        *rc = r;
+                    return w;
+                }
+            remember(w, r);
+            continue;
+        }
+        if (waited >= timeout_ms)
+            return 0;
+        nanosleep(&step, NULL);
     }
 }
 

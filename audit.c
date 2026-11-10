@@ -103,6 +103,254 @@ void report_print(const Report *r, FILE *fp, bool color)
     }
 }
 
+/* ------------------------------------------------------------ plain language */
+
+/*
+ * Plain-language explanations, matched by substring of the finding message.
+ * Order matters: the first match wins, so specific keys come first.
+ */
+static const struct {
+    const char *key;
+    const char *plain;
+} explain[] = {
+    /* these messages contain package names: match them before anything else */
+    { "does not match the expected package", "the built package claims to be a different package than the one you approved" },
+    { "no .PKGINFO", "the built package has no description; pacman would not accept it as built" },
+    /* remote code / backdoors */
+    { "download piped straight into a shell",
+      "downloads a program from the internet and runs it at once; that code was never shown to you (typical of malware)" },
+    { "base64 payload piped into a shell", "runs hidden, encoded code (typical of malware)" },
+    { "/dev/tcp", "opens a network connection from the script (used by remote-control backdoors)" },
+    { "netcat -e", "gives another computer control of a shell on yours (backdoor)" },
+    { "interactive shell redirected", "gives another computer control of a shell on yours (backdoor)" },
+    { "named pipe / socat", "uses a building block common in backdoors; rare in normal packages" },
+    { "authorized_keys", "touches SSH login keys: could let someone log in to your computer" },
+    { "references a critical system file", "touches files that control passwords, admin rights or every program" },
+    { "recursive delete", "deletes your whole system or your personal folder" },
+    /* obfuscation */
+    { "base64 decoding", "decodes hidden text; sometimes harmless data, but often used to hide code" },
+    { "hex/openssl decoding", "decodes hidden text; sometimes harmless data, but often used to hide code" },
+    { "hex-escaped byte string", "text written as raw bytes, hard to read; can hide code" },
+    { "eval executes", "builds code while running, so what runs may differ from what you read" },
+    { "inline interpreter code", "runs a small program in another language (Python, Perl...) inside the script" },
+    /* privileges / persistence */
+    { "sudo inside", "asks for administrator rights during the build; packages never need this" },
+    { "systemd units", "turns on a background service by itself; that should be your decision" },
+    { "pre-enabled systemd unit", "a background service is switched on without asking you" },
+    { "admin systemd directory", "puts a service in the folder reserved for the administrator's own settings" },
+    { "world-writable", "lets any user on the computer change these files" },
+    { "setuid/setgid file in repository", "the package repository contains a file with admin-rights bits set" },
+    { "setuid", "a program runs with administrator rights for any user; only a few system tools need this" },
+    { "setgid", "a program runs with extra group rights for any user; only a few system tools need this" },
+    { "file capabilities", "gives a program special powers, or makes a file impossible to delete" },
+    { "cron", "schedules something to run automatically, again and again" },
+    { "shell startup file", "changes what runs every time you open a terminal or log in" },
+    { "runs code at every login shell", "runs code every time anyone logs in" },
+    { "global environment", "changes settings that every program on the system inherits" },
+    { "autostart", "starts a program automatically when you log in" },
+    { "dynamic loader injection", "forces extra code into other programs when they start" },
+    { "library injection", "forces extra code into every program on the system" },
+    { "kernel module loading", "loads code into the operating system core (full control of the machine)" },
+    { "loads kernel modules at boot", "loads drivers at every boot; normal only for driver packages" },
+    { "kernel module", "adds a driver to the operating system core; normal only for driver packages" },
+    { "account manipulation", "creates or changes user accounts or passwords" },
+    { "writes into a home directory", "writes into your personal folder; packages should only use system folders" },
+    { "references a home directory", "mentions your personal folder; usually harmless (docs, defaults), check what it does there" },
+    { "installs into a home directory", "puts files in a personal folder; real packages never do this" },
+    { "installs into /root", "puts files in the administrator's personal folder; real packages never do this" },
+    { "URL shortener", "uses a link shortener, paste site or webhook: places attackers use to hide or swap content" },
+    { "raw IP", "connects to a bare number instead of a website name (common in malware)" },
+    /* network during build */
+    { "downloads during build", "downloads files while building; they are not checked against a fingerprint" },
+    { "fetches code during build", "downloads extra code while building (git/pip/npm/go); common for some languages, but that code is not verified" },
+    { "detaches a background process", "leaves a program running in the background after the build" },
+    { "firewall", "changes firewall rules" },
+    { "udev rule runs", "runs a program as administrator when a device is plugged in; normal for hardware tools" },
+    { "udev rule", "reacts to devices being plugged in; normal for hardware tools" },
+    /* hidden characters */
+    { "carriage return", "contains invisible characters that can hide code from you on screen" },
+    { "terminal control character", "contains invisible characters that can hide code from you on screen" },
+    { "invisible/bidi Unicode", "contains invisible characters that make code look different from what really runs" },
+    /* .SRCINFO / sources */
+    { "entries but source", "the list of fingerprints does not match the list of downloads" },
+    { "sources have no checksums", "downloads have no fingerprint, so nobody can tell if they were replaced" },
+    { "remote source without checksum", "a download has no fingerprint (SKIP), so it could be replaced on the server unnoticed" },
+    { "only weak checksums", "uses old fingerprints (MD5/SHA-1) that can be forged" },
+    { "plain HTTP/FTP", "downloads without encryption; the network could tamper with it unless a fingerprint protects it" },
+    { "git:// protocol", "downloads code over a connection that is not authenticated" },
+    { "pinned to a tag", "uses a named version (tag) that its author could move later" },
+    { "unpinned VCS source", "always builds the newest code from the developer, which nobody reviewed (normal for -git packages)" },
+    { "prebuilt binary", "installs a ready-made program instead of building it; you trust whoever made that file" },
+    { "no validpgpkeys", "the download is signed but nobody checks the signature" },
+    { "not a full 40/64-hex fingerprint", "a signing key is given in a short form that can be faked" },
+    { "invalid dependency string", "a dependency is written in an unexpected way" },
+    { "install scriptlet referenced", "an install script is announced but missing" },
+    { "install scriptlet", "has an install script that runs as administrator during installation; many packages have one" },
+    { "malformed .SRCINFO", "the package description is broken or tampered with" },
+    { "invalid pkg", "the package name is invalid (broken or tampered with)" },
+    { "no pkgname", "the package description is broken" },
+    { "missing or not a regular file", "the package is incomplete" },
+    { "missing: not a valid AUR", "the package is incomplete" },
+    /* repository content */
+    { "symlink", "contains a link to another place on disk" },
+    { "submodule", "pulls in code from another repository that was not shown to you" },
+    { "binary image", "contains a picture (usually an icon)" },
+    { "binary file in repository", "contains a compiled file nobody can read; AUR packages should hold only text" },
+    { "hidden file", "contains a hidden file" },
+    { "special file", "contains a special file (device, pipe or socket)" },
+    { "large file not scanned", "a file too large to check automatically" },
+    { "too many", "too much content to check automatically" },
+    /* built package */
+    { "sudoers", "changes who can become administrator" },
+    { "shadow file", "replaces the password files" },
+    { "passwd file", "replaces the user account files" },
+    { "SSH configuration", "changes remote login settings" },
+    { "PAM", "changes how logins and passwords are checked" },
+    { "security limits", "changes system security limits and access rules" },
+    { "pacman hook", "runs as administrator every time you install or update anything" },
+    { "pacman configuration", "changes pacman's own settings" },
+    { "/tmp", "installs into a temporary folder, which is unusual" },
+    { "polkit", "changes which actions are allowed without a password" },
+    { "systemd generator", "runs as administrator at every boot" },
+    { "sysctl", "changes operating system settings" },
+    { "/usr/local", "installs into /usr/local, which is reserved for your own manual installs" },
+    { "'..' path", "tries to write files outside the normal places" },
+    /* AUR trust signals */
+    { "new package with", "this package is very new and nobody has voted for it yet; recent AUR malware looked exactly like this" },
+    { "few votes", "few people use this package, so problems are less likely to have been noticed" },
+    { "ORPHANED", "nobody maintains this package; anyone can adopt it and change it" },
+    { "OUT OF DATE", "users reported that this package is outdated" },
+};
+
+const char *audit_explain(const char *msg)
+{
+    if (msg == NULL)
+        return NULL;
+    for (size_t i = 0; i < sizeof explain / sizeof explain[0]; i++)
+        if (strstr(msg, explain[i].key) != NULL)
+            return explain[i].plain;
+    return NULL;
+}
+
+Verdict audit_verdict(const Report *r)
+{
+    switch (r->max) {
+    case SEV_CRIT: return VERDICT_BLOCK;
+    case SEV_HIGH: return VERDICT_DANGER;
+    case SEV_WARN: return VERDICT_CAUTION;
+    default:       return VERDICT_OK;
+    }
+}
+
+const char *verdict_title(Verdict v)
+{
+    switch (v) {
+    case VERDICT_OK:      return "No warning signs found";
+    case VERDICT_CAUTION: return "Some things need your attention";
+    case VERDICT_DANGER:  return "Serious warning signs";
+    case VERDICT_BLOCK:   return "DANGER: looks malicious or broken";
+    }
+    return "?";
+}
+
+const char *verdict_advice(Verdict v)
+{
+    switch (v) {
+    case VERDICT_OK:
+        return "Nothing unusual was detected. Automatic checks cannot prove that a package\n"
+               "   is safe, so prefer packages that many people use.";
+    case VERDICT_CAUTION:
+        return "These things are common in normal packages. If they fit what the program\n"
+               "   is supposed to do, it is usually fine.";
+    case VERDICT_DANGER:
+        return "Do not install unless you know why the package needs this. If unsure,\n"
+               "   choose [s] skip and ask in the package's AUR comments or the forums.";
+    case VERDICT_BLOCK:
+        return "Recommended: [s] skip. This pattern is typical of malicious packages.\n"
+               "   Approving requires typing the package name.";
+    }
+    return "";
+}
+
+static const char *sev_mark(Severity s)
+{
+    switch (s) {
+    case SEV_CRIT: return "!!";
+    case SEV_HIGH: return "! ";
+    case SEV_WARN: return "* ";
+    default:       return "- ";
+    }
+}
+
+void report_print_plain(const Report *r, FILE *fp, bool color)
+{
+    if (r->n == 0) {
+        fputs("   nothing to report\n", fp);
+        return;
+    }
+    bool *done = xcalloc(r->n, sizeof(bool));
+    size_t shown = 0, hidden = 0;
+    for (int s = SEV_CRIT; s >= SEV_INFO; s--) {
+        for (size_t i = 0; i < r->n; i++) {
+            const Finding *f = &r->f[i];
+            if ((int)f->sev != s || done[i])
+                continue;
+            const char *plain = audit_explain(f->msg);
+            /* group every finding with the same explanation (or message) */
+            size_t count = 0;
+            for (size_t j = i; j < r->n; j++) {
+                const char *pj = audit_explain(r->f[j].msg);
+                bool same = plain ? (pj == plain) : strcmp(r->f[j].msg, f->msg) == 0;
+                if (!done[j] && (int)r->f[j].sev == s && same) {
+                    done[j] = true;
+                    count++;
+                }
+            }
+            if (s == SEV_INFO && shown >= 12) {
+                hidden++;
+                continue;
+            }
+            shown++;
+            if (color)
+                fprintf(fp, "   %s%s\033[0m ", sev_color(f->sev), sev_mark(f->sev));
+            else
+                fprintf(fp, "   %s ", sev_mark(f->sev));
+            safe_fputs(fp, plain ? plain : f->msg);
+            fputs("\n        (", fp);
+            safe_fputs(fp, f->file[0] ? f->file : "package");
+            if (f->line > 0)
+                fprintf(fp, " line %ld", f->line);
+            if (count > 1)
+                fprintf(fp, ", and %zu more place%s", count - 1, count > 2 ? "s" : "");
+            fputs(")\n", fp);
+        }
+    }
+    if (hidden)
+        fprintf(fp, "   (%zu more minor notes; choose [v] for the technical details)\n", hidden);
+    free(done);
+}
+
+void audit_aur_meta(Report *r, const AurMeta *m, long now)
+{
+    if (m == NULL || !m->known)
+        return;
+    long age_days = m->first_submitted > 0 && now > m->first_submitted
+                        ? (now - m->first_submitted) / 86400 : -1;
+    char msg[160];
+    if (age_days >= 0 && age_days < 30 && m->votes <= 2) {
+        snprintf(msg, sizeof msg, "new package with %ld vote%s, first submitted %ld day%s ago",
+                 m->votes, m->votes == 1 ? "" : "s", age_days, age_days == 1 ? "" : "s");
+        report_add(r, SEV_WARN, "AUR", 0, msg, NULL);
+    } else if (m->votes < 5) {
+        snprintf(msg, sizeof msg, "few votes (%ld): little community use", m->votes);
+        report_add(r, SEV_INFO, "AUR", 0, msg, NULL);
+    }
+    if (m->orphan)
+        report_add(r, SEV_WARN, "AUR", 0, "ORPHANED package (no maintainer)", NULL);
+    if (m->outofdate)
+        report_add(r, SEV_INFO, "AUR", 0, "flagged OUT OF DATE", NULL);
+}
+
 /* ------------------------------------------------------------ rules */
 
 typedef struct {
@@ -208,7 +456,7 @@ static Kind classify(const char *name, const char *text, size_t len)
     const char *b = base_name(name);
     if (strcmp(b, "PKGBUILD") == 0) return K_PKGBUILD;
     if (strcmp(b, ".SRCINFO") == 0) return K_SRCINFO;
-    if (ends_with(b, ".install")) return K_INSTALL;
+    if (ends_with(b, ".install") || strcmp(b, ".INSTALL") == 0) return K_INSTALL;
     if (ends_with(b, ".patch") || ends_with(b, ".diff")) return K_PATCH;
     if (ends_with(b, ".sh") || ends_with(b, ".bash") || ends_with(b, ".zsh") ||
         ends_with(b, ".py") || ends_with(b, ".pl") || ends_with(b, ".rb") ||
@@ -634,6 +882,80 @@ void audit_srcinfo_text(Report *r, const char *text)
     srcinfo_free(&si);
 }
 
+void audit_source_stats(const char *srcinfo_text, SourceStats *st)
+{
+    memset(st, 0, sizeof *st);
+    SrcInfo si;
+    if (srcinfo_text == NULL || srcinfo_parse(srcinfo_text, &si) != 0)
+        return;
+    StrList suffixes;
+    sl_init(&suffixes);
+    for (size_t i = 0; i < si.n; i++) {
+        const char *k = si.e[i].key;
+        if (strncmp(k, "source", 6) == 0 && (k[6] == '\0' || k[6] == '_'))
+            sl_push_unique(&suffixes, k + 6);
+    }
+    char key[64];
+    for (size_t x = 0; x < suffixes.n; x++) {
+        const char *suffix = suffixes.v[x];
+        StrList src;
+        sl_init(&src);
+        snprintf(key, sizeof key, "source%s", suffix);
+        srcinfo_values_exact(&si, key, &src);
+        StrList sums[8];
+        bool strong[8];
+        size_t na = 0;
+        for (int w = 0; w < 2; w++) {
+            const char *const *list = w ? weak_algos : strong_algos;
+            for (size_t i = 0; list[i] && na < 8; i++) {
+                snprintf(key, sizeof key, "%s%s", list[i], suffix);
+                sl_init(&sums[na]);
+                srcinfo_values_exact(&si, key, &sums[na]);
+                strong[na] = !w;
+                na++;
+            }
+        }
+        for (size_t i = 0; i < src.n; i++) {
+            const char *sep = strstr(src.v[i], "::");
+            const char *url = sep ? sep + 2 : src.v[i];
+            st->total++;
+            if (is_vcs(url)) {
+                st->vcs++;
+                if (strstr(url, "#commit=") != NULL)
+                    st->vcs_pinned++;
+                continue;
+            }
+            if (is_sig(url)) {
+                st->signatures++;
+                continue;
+            }
+            if (strstr(url, "://") == NULL)
+                continue;   /* local file from the reviewed repository */
+            st->remote++;
+            bool have_strong = false, have_weak = false;
+            for (size_t a = 0; a < na; a++) {
+                if (i >= sums[a].n || strcmp(sums[a].v[i], "SKIP") == 0)
+                    continue;
+                if (strong[a])
+                    have_strong = true;
+                else
+                    have_weak = true;
+            }
+            if (have_strong)
+                st->strong++;
+            else if (have_weak)
+                st->weak++;
+            else
+                st->unchecked++;
+        }
+        for (size_t a = 0; a < na; a++)
+            sl_free(&sums[a]);
+        sl_free(&src);
+    }
+    sl_free(&suffixes);
+    srcinfo_free(&si);
+}
+
 /* ------------------------------------------------------------ repository */
 
 typedef struct {
@@ -974,4 +1296,83 @@ int audit_package_file(const char *pkgfile, Report *r)
         report_add(r, SEV_WARN, pname, 0, "too many findings, output truncated", NULL);
     sl_free(&lines);
     return 0;
+}
+
+/* "key = value" lines of a .PKGINFO */
+static const char *pkginfo_value(const StrList *lines, const char *key, char *buf, size_t sz)
+{
+    size_t kl = strlen(key);
+    for (size_t i = 0; i < lines->n; i++) {
+        const char *l = lines->v[i];
+        if (strncmp(l, key, kl) == 0 && strncmp(l + kl, " = ", 3) == 0) {
+            snprintf(buf, sz, "%s", l + kl + 3);
+            return buf;
+        }
+    }
+    return NULL;
+}
+
+void audit_pkginfo_text(Report *r, const char *where, const char *text,
+                        const char *expect_name, const char *expect_base)
+{
+    StrList lines;
+    sl_init(&lines);
+    sl_split_lines(&lines, text ? text : "");
+    char name[MAX_NAME_LEN + 1], base[MAX_NAME_LEN + 1];
+    const char *n = pkginfo_value(&lines, "pkgname", name, sizeof name);
+    const char *b = pkginfo_value(&lines, "pkgbase", base, sizeof base);
+    if (n == NULL) {
+        report_add(r, SEV_CRIT, where, 0, "no .PKGINFO pkgname in the built package", NULL);
+    } else if (expect_name && strcmp(n, expect_name) != 0) {
+        char msg[MAX_NAME_LEN + 96];
+        snprintf(msg, sizeof msg, "pkgname inside does not match the expected package %s",
+                 expect_name);
+        report_add(r, SEV_CRIT, where, 0, msg, n);
+    }
+    if (b && expect_base && strcmp(b, expect_base) != 0) {
+        char msg[MAX_NAME_LEN + 96];
+        snprintf(msg, sizeof msg, "pkgbase inside does not match the expected package %s",
+                 expect_base);
+        report_add(r, SEV_CRIT, where, 0, msg, b);
+    }
+    sl_free(&lines);
+}
+
+/* bsdtar -xOqf pkgfile member: one member's content (bounded). */
+static int extract_member(const char *pkgfile, const char *member, StrBuf *out)
+{
+    const char *argv[] = { BIN_BSDTAR, "-xOqf", pkgfile, member, NULL };
+    ProcOpts o;
+    memset(&o, 0, sizeof o);
+    o.capture = out;
+    o.stdin_null = true;
+    o.stderr_null = true;
+    return proc_run(argv, &o) == 0 ? 0 : -1;
+}
+
+int audit_built_package(const char *pkgfile, const char *expect_name,
+                        const char *expect_base, Report *r)
+{
+    int rc = audit_package_file(pkgfile, r);
+    const char *pname = base_name(pkgfile);
+    char where[PATH_BUF];
+
+    StrBuf info;
+    sb_init(&info, MAX_SCAN_FILE_BYTES);
+    snprintf(where, sizeof where, "%s:/.PKGINFO", pname);
+    if (extract_member(pkgfile, ".PKGINFO", &info) != 0)
+        report_add(r, SEV_CRIT, where, 0, "no .PKGINFO in the built package", NULL);
+    else
+        audit_pkginfo_text(r, where, info.data, expect_name, expect_base);
+    sb_free(&info);
+
+    /* the scriptlet that really runs as root (it may differ from *.install
+     * in the repository if PKGBUILD generated or edited it) */
+    StrBuf inst;
+    sb_init(&inst, MAX_SCAN_FILE_BYTES);
+    snprintf(where, sizeof where, "%s:/.INSTALL", pname);
+    if (extract_member(pkgfile, ".INSTALL", &inst) == 0 && inst.len > 0)
+        audit_scan_text(r, where, inst.data, inst.len);
+    sb_free(&inst);
+    return rc;
 }

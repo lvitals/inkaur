@@ -23,6 +23,11 @@ void run_perf_tests(void)
     ASSERT(perf_config_parse("BuildJobs = lots\n", "test", &bad) != 0, "bad value refused");
     ASSERT(perf_config_parse("Bogus = 1\n", "test", &bad) != 0, "unknown key refused");
     ASSERT(perf_config_parse("Parallel\n", "test", &bad) != 0, "missing '=' refused");
+    ASSERT(bad.review == 0, "simple review by default");
+    ASSERT(perf_config_parse("Review = full\n", "test", &bad) == 0 && bad.review == 1,
+           "Review = full");
+    ASSERT(perf_config_parse("Review = lazy\n", "test", &bad) != 0, "bad Review refused");
+    ASSERT(perf_parse_review("simple") == 0 && perf_parse_review("x") < 0, "review parse");
 
     PerfFacts f;
     memset(&f, 0, sizeof f);

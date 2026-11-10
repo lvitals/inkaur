@@ -1,5 +1,7 @@
 #include "tty.h"
 
+#include <sys/ioctl.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,4 +78,14 @@ bool ask_approval(const char *prompt)
     return strcmp(buf, "y") == 0 || strcmp(buf, "Y") == 0 ||
            strcmp(buf, "yes") == 0 || strcmp(buf, "s") == 0 ||
            strcmp(buf, "sim") == 0;
+}
+
+size_t tty_columns(void)
+{
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+        return ws.ws_col;
+    const char *c = getenv("COLUMNS");
+    long n = c ? strtol(c, NULL, 10) : 0;
+    return n > 0 && n < 10000 ? (size_t)n : 80;
 }

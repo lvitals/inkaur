@@ -7,6 +7,8 @@
 bool use_color(void);          /* stdout is a tty and NO_COLOR unset */
 void tty_set_color(int mode);  /* -1 auto, 0 never, 1 always (--color) */
 bool stdin_is_tty(void);
+/* Width of the terminal on stdout ($COLUMNS, else 80). */
+size_t tty_columns(void);
 
 /* Generic question. With noconfirm returns default_yes without asking. */
 bool ask_yesno(const char *prompt, bool default_yes, bool noconfirm);

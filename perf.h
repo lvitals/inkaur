@@ -21,6 +21,7 @@
  *   RepoDownload = auto | pacman | mirrors | no
  *   Mirrors   = auto | 1..8          # servers used by RepoDownload = mirrors
  *   SpeedTest = auto | always | never
+ *   Review    = simple | full       # full: open the code in the pager right away
  *
  * "auto" accelerates by default and scales down on few CPUs, little free
  * RAM, or a slow connection measured by `inkaur --speedtest`.
@@ -33,6 +34,7 @@ typedef struct {
     int repo_download;/* -1 auto, 0 no, 1 pacman, 2 mirrors */
     int mirrors;      /* 0 = auto (3) */
     int speedtest;    /* 0 never, 1 auto (use saved result), 2 always (measure each -Su) */
+    int review;       /* 0 simple (summary first, code on request), 1 full (pager right away) */
 } PerfConfig;
 
 typedef struct {
@@ -73,6 +75,9 @@ int perf_measure(const char *pacman_config, PerfFacts *f, bool verbose);
 int perf_save_speed(const char *cache, const PerfFacts *f);
 
 void perf_decide(const PerfConfig *c, const PerfFacts *f, bool chroot, PerfPlan *out);
+
+/* "simple|full" -> 0/1, or -1 if invalid. */
+int perf_parse_review(const char *s);
 
 /* "auto|no|pacman|mirrors" -> -1/0/1/2, or -2 if invalid. */
 int perf_parse_repo_download(const char *s);

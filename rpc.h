@@ -14,6 +14,10 @@ typedef struct {
     char *desc;        /* may be NULL */
     long outofdate;    /* 0 if not flagged */
     bool orphan;       /* Maintainer == null */
+    long votes;        /* NumVotes */
+    double popularity; /* Popularity */
+    long first_submitted; /* unix time, 0 if unknown */
+    long last_modified;   /* unix time, 0 if unknown */
     const JVal *raw;   /* borrowed from the response, for -Si */
 } AurPkg;
 

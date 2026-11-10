@@ -8,6 +8,7 @@
 
 typedef struct {
     bool noconfirm;        /* only for pacman/makepkg prompts; reviews always ask */
+    bool full_review;      /* open the code in the pager right away (Review = full) */
     bool needed;
     bool asdeps, asexplicit;
     bool aur_only, repo_only;

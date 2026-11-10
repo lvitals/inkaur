@@ -108,6 +108,10 @@ static void usage_sync(void)
          "      --repo           only the repositories (plain pacman)\n"
          "      --chroot <dir>   build in a clean devtools chroot (<dir>/root,\n"
          "                       create with: mkarchroot <dir>/root base-devel)\n"
+         "      --review <simple|full>\n"
+         "                       simple (default): a plain-language safety summary\n"
+         "                       first, the code on request; full: open the code\n"
+         "                       in the pager right away\n"
          "parallelism (inkaur; defaults in ~/.config/inkaur/inkaur.conf):\n"
          "      --jobs <n|auto>  AUR packages built at the same time; a package starts\n"
          "                       only after its AUR dependencies are installed\n"
@@ -126,10 +130,11 @@ static void usage_sync(void)
          "                       free RAM and the speed saved by 'inkaur --speedtest'\n"
          "  targets may be prefixed with a repository ('extra/pkg') or 'aur/'");
     usage_common(true, true);
-    puts("\nsecurity: every AUR package (and every AUR dependency) is audited and\n"
-         "shown for review at an exact git commit before anything is built;\n"
-         "updates show only the diff since your last approval. After every\n"
-         "transaction inkaur prints a summary of the changes.");
+    puts("\nsecurity: every AUR package (and every AUR dependency) is audited at an\n"
+         "exact git commit and explained in plain words before anything is built;\n"
+         "nothing is built without your approval. The built package is checked\n"
+         "again and installed only if its SHA-256 still matches what was checked.\n"
+         "After every transaction inkaur prints a summary of the changes.");
 }
 
 static void usage_query(void)
@@ -222,7 +227,8 @@ static void usage_speedtest(void)
          "    FetchJobs = auto      # auto | 1..64\n"
          "    RepoDownload = auto   # auto | pacman | mirrors | no\n"
          "    Mirrors   = auto      # mirrors per repo for RepoDownload = mirrors\n"
-         "    SpeedTest = auto      # auto (use saved result) | always | never");
+         "    SpeedTest = auto      # auto (use saved result) | always | never\n"
+         "    Review    = simple    # simple (safety summary, code on request) | full");
 }
 
 static void usage_rankmirrors(void)
@@ -718,6 +724,15 @@ int main(int argc, char **argv)
         }
         pc.repo_download = v;
     }
+    if (c.review) {
+        int v = perf_parse_review(c.review);
+        if (v < 0) {
+            fputs("error: --review takes simple or full\n", stderr);
+            rc = 1;
+            goto done;
+        }
+        pc.review = v;
+    }
     if (c.mirrors) {
         int v = perf_parse_jobs(c.mirrors);
         if (v < 0 || v > 8) {
@@ -759,6 +774,7 @@ int main(int argc, char **argv)
     Options o;
     memset(&o, 0, sizeof o);
     o.noconfirm = c.noconfirm;
+    o.full_review = pc.review == 1;
     o.needed = c.needed;
     o.asdeps = c.asdeps;
     o.asexplicit = c.asexplicit;

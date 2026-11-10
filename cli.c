@@ -100,6 +100,7 @@ static const OptDef OPTS[] = {
     { "parallel", 0, OP_S, false, K_LOCAL, false },
     { "repo-download", 0, OP_S, true, K_LOCAL, false },
     { "mirrors", 0, OP_S, true, K_LOCAL, false },
+    { "review", 0, OP_S, true, K_LOCAL, false },
     { "all", 0, OP_M, false, K_LOCAL, false },
     { "count", 0, OP_M, true, K_LOCAL, false },
 };
@@ -267,6 +268,7 @@ static void apply(Cli *c, const OptDef *d, const char *val)
     else if (strcmp(d->lng, "repo-download") == 0) c->repo_download = val;
     else if (strcmp(d->lng, "mirrors") == 0) c->mirrors = val;
     else if (strcmp(d->lng, "count") == 0) c->count = val;
+    else if (strcmp(d->lng, "review") == 0) c->review = val;
     else if (strcmp(d->lng, "config") == 0) c->config = val;
     else if (strcmp(d->lng, "ignore") == 0) split_ignore(c, val);
     else if (strcmp(d->lng, "color") == 0)

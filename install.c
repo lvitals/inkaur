@@ -10,6 +10,7 @@
 #include "proc.h"
 #include "review.h"
 #include "rpc.h"
+#include "sha256.h"
 #include "srcinfo.h"
 #include "tty.h"
 #include "validate.h"
@@ -43,11 +44,20 @@ typedef struct {
     char commit[80];
     char dir[PATH_BUF];
     SrcInfo si;
-    StrList built;         /* package files to install */
+    StrList built;         /* staged package files to install (private copies) */
+    StrList sha;           /* SHA-256 of each built[] file, taken when it was staged */
+    AurMeta meta;          /* AUR trust signals */
     bool running;          /* parallel build in progress */
     pid_t pid;
     time_t started;
     char log[PATH_BUF];
+    /* progress of a background build, read from its log */
+    off_t log_off;
+    const char *stage;     /* plain-language stage, NULL before the first one */
+    int percent;           /* -1 unknown */
+    char detail[96];       /* file being downloaded */
+    char carry[512];       /* unfinished log line */
+    size_t ncarry;
 } Node;
 
 typedef struct {
@@ -67,11 +77,21 @@ static void node_free(Node *n)
     sl_free(&n->want);
     sl_free(&n->aliases);
     sl_free(&n->built);
+    sl_free(&n->sha);
     srcinfo_free(&n->si);
+}
+
+/* <cache>/.staged: audited, hash-pinned copies of the built packages. */
+static bool staging_root(const char *cache, char *buf, size_t sz)
+{
+    return cache && path_join(buf, sz, cache, ".staged");
 }
 
 static void plan_free(Plan *p)
 {
+    char st[PATH_BUF];
+    if (p->n && staging_root(p->o->cache, st, sizeof st))
+        rmtree(st);
     for (size_t i = 0; i < p->n; i++)
         node_free(&p->v[i]);
     free(p->v);
@@ -396,7 +416,15 @@ static int resolve(Plan *p, const char *depstr, bool explicit, int depth)
     sl_init(&n.want);
     sl_init(&n.aliases);
     sl_init(&n.built);
+    sl_init(&n.sha);
     sl_push(&n.want, pkg->name);
+    n.meta.known = true;
+    n.meta.votes = pkg->votes;
+    n.meta.popularity = pkg->popularity;
+    n.meta.first_submitted = pkg->first_submitted;
+    n.meta.last_modified = pkg->last_modified;
+    n.meta.outofdate = pkg->outofdate;
+    n.meta.orphan = pkg->orphan;
     sl_push(&n.aliases, name);
     n.asdeps = !explicit;
     rpc_result_free(&res);
@@ -590,7 +618,6 @@ static int build_prepare(Node *n)
 /* After a successful build: find the package files and audit them. */
 static int build_collect(Plan *p, Node *n)
 {
-    (void)p;
     StrBuf list;
     sb_init(&list, 1u << 20);
     const char *pl[] = { BIN_MAKEPKG, "--packagelist", NULL };
@@ -608,28 +635,69 @@ static int build_collect(Plan *p, Node *n)
     sl_init(&files);
     sl_split_lines(&files, list.data);
     sb_free(&list);
+
+    /* Stage a private copy of every package, hashing it while copying. The
+     * copy is what gets audited, and pacman -U installs it only if its hash
+     * still matches, so nothing can be swapped in after the audit. */
+    char root[PATH_BUF], stage[PATH_BUF];
+    if (!staging_root(p->o->cache, root, sizeof root) || ensure_private_dir(root) != 0 ||
+        !path_join(stage, sizeof stage, root, n->base) || rmtree(stage) != 0 ||
+        ensure_private_dir(stage) != 0) {
+        fprintf(stderr, "error: %s: could not create the staging directory\n", n->base);
+        sl_free(&files);
+        return -1;
+    }
+    sl_free(&n->built);
+    sl_free(&n->sha);
+    StrList names;
+    sl_init(&names);
     for (size_t i = 0; i < files.n; i++) {
         char *pn = pkgname_from_file(files.v[i]);
         if (pn && sl_contains(&n->want, pn) && files.v[i][0] == '/' &&
-            is_file_nofollow(files.v[i]))
-            sl_push(&n->built, files.v[i]);
+            is_file_nofollow(files.v[i])) {
+            const char *b = strrchr(files.v[i], '/') + 1;
+            char dst[PATH_BUF], hex[SHA256_HEX_LEN + 1];
+            if (!path_join(dst, sizeof dst, stage, b) || sha256_copy(files.v[i], dst, hex) != 0) {
+                fprintf(stderr, "error: %s: could not copy %s for verification\n", n->base, b);
+                free(pn);
+                sl_free(&files);
+                sl_free(&names);
+                return -1;
+            }
+            sl_push(&n->built, dst);
+            sl_push(&n->sha, hex);
+            sl_push(&names, pn);
+        }
         free(pn);
     }
     sl_free(&files);
     if (n->built.n == 0) {
         fprintf(stderr, "error: %s: no built package found for the requested names\n", n->base);
+        sl_free(&names);
         return -1;
     }
 
     Report rep;
     report_init(&rep);
     for (size_t i = 0; i < n->built.n; i++)
-        audit_package_file(n->built.v[i], &rep);
-    printf("\n%s:: Package content audit for %s%s\n", C_BOLD, n->base, C_END);
-    report_print(&rep, stdout, use_color());
+        audit_built_package(n->built.v[i], names.v[i], n->base, &rep);
+    sl_free(&names);
+    printf("\n%s:: Checking the built package of %s before installing%s\n", C_BOLD, n->base,
+           C_END);
+    for (size_t i = 0; i < n->built.n; i++) {
+        printf("   %s\n      SHA-256 %s\n", strrchr(n->built.v[i], '/') + 1, n->sha.v[i]);
+        syslog(LOG_AUTHPRIV | LOG_NOTICE, "built pkgbase=%s commit=%s file=%s sha256=%s",
+               n->base, n->commit, strrchr(n->built.v[i], '/') + 1, n->sha.v[i]);
+    }
+    printf("   %s%s%s\n", rep.max >= SEV_HIGH ? C_RED : rep.max == SEV_WARN ? C_YEL : C_GREEN,
+           verdict_title(audit_verdict(&rep)), C_END);
+    report_print_plain(&rep, stdout, use_color());
     Decision d = DEC_APPROVE;
-    if (rep.max >= SEV_HIGH)
-        d = ask_decision(n->base, "built package: install it?", rep.max, n->installed, false);
+    if (rep.max >= SEV_HIGH) {
+        printf("\n%s:: Technical details%s\n", C_BOLD, C_END);
+        report_print(&rep, stdout, use_color());
+        d = ask_decision(n->base, "built package: install it?", rep.max, n->installed, NULL);
+    }
     syslog(LOG_AUTHPRIV | LOG_NOTICE, "package audit decision=%d pkgbase=%s commit=%s max_severity=%s",
            (int)d, n->base, n->commit, severity_name(rep.max));
     report_free(&rep);
@@ -684,8 +752,32 @@ static int build_node(Plan *p, Node *n)
     return build_collect(p, n);
 }
 
+/* The staged files must still be exactly what was audited. */
+static int verify_staged(const Node *n)
+{
+    if (n->built.n == 0 || n->sha.n != n->built.n)
+        return -1;
+    for (size_t i = 0; i < n->built.n; i++) {
+        char hex[SHA256_HEX_LEN + 1];
+        if (sha256_file(n->built.v[i], hex) != 0 || strcmp(hex, n->sha.v[i]) != 0) {
+            fprintf(stderr, "%serror: %s CHANGED after it was checked (SHA-256 mismatch).%s\n"
+                            "   Nothing was installed. Another program modified the file; "
+                            "this can be an attack.\n",
+                    C_RED, strrchr(n->built.v[i], '/') + 1, C_END);
+            syslog(LOG_AUTHPRIV | LOG_WARNING, "SHA-256 MISMATCH pkgbase=%s file=%s expected=%s",
+                   n->base, n->built.v[i], n->sha.v[i]);
+            return -1;
+        }
+    }
+    printf("   %sverified%s: SHA-256 of %zu package file%s matches what was checked\n",
+           C_GREEN, C_END, n->built.n, n->built.n == 1 ? "" : "s");
+    return 0;
+}
+
 static int install_node(const Options *o, const Node *n)
 {
+    if (verify_staged(n) != 0)
+        return -1;
     StrList args;
     sl_init(&args);
     sl_push(&args, "--upgrade");
@@ -698,7 +790,9 @@ static int install_node(const Options *o, const Node *n)
     int rc = pacman_run(true, &args, &n->built);
     sl_free(&args);
     if (rc == 0) {
-        syslog(LOG_AUTHPRIV | LOG_NOTICE, "installed pkgbase=%s commit=%s", n->base, n->commit);
+        for (size_t i = 0; i < n->built.n; i++)
+            syslog(LOG_AUTHPRIV | LOG_NOTICE, "installed pkgbase=%s commit=%s file=%s sha256=%s",
+                   n->base, n->commit, strrchr(n->built.v[i], '/') + 1, n->sha.v[i]);
         for (size_t i = 0; o->touched && i < n->want.n; i++)
             sl_push_unique(o->touched, n->want.v[i]);
     }
@@ -960,6 +1054,267 @@ static void fmt_elapsed(char *buf, size_t sz, time_t secs)
         snprintf(buf, sz, "%lds", (long)secs);
 }
 
+/* ------------------------------------------------------------ build progress */
+
+/*
+ * What each background build is doing, in plain words, read from the
+ * "==> " stage messages makepkg writes to the log. The log is read
+ * incrementally (only the new bytes on every tick).
+ */
+static const struct {
+    const char *key;
+    const char *stage;
+} stages[] = {
+    { "Making package", "starting" },
+    { "Checking runtime dependencies", "checking dependencies" },
+    { "Checking buildtime dependencies", "checking dependencies" },
+    { "Retrieving sources", "downloading the source code" },
+    { "Validating source files", "checking download fingerprints" },
+    { "Verifying source file signatures", "checking signatures" },
+    { "Extracting sources", "unpacking the source code" },
+    { "Removing existing $srcdir", "unpacking the source code" },
+    { "Starting prepare()", "preparing" },
+    { "Starting pkgver()", "detecting the version" },
+    { "Starting build()", "compiling" },
+    { "Starting check()", "running the package's tests" },
+    { "Entering fake root", "packaging" },
+    { "Starting package()", "packaging" },
+    { "Tidying install", "packaging" },
+    { "Checking for packaging issues", "packaging" },
+    { "Creating package", "creating the package file" },
+    { "Leaving fake root", "creating the package file" },
+    { "Finished making", "finished, checking the result" },
+};
+
+/* Drops "ESC [ ... letter" color codes, turns tabs into spaces. */
+static size_t strip_ansi(const char *in, size_t n, char *out, size_t outsz)
+{
+    size_t k = 0;
+    for (size_t i = 0; i < n && k + 1 < outsz; i++) {
+        if (in[i] == '\033') {
+            if (i + 1 < n && in[i + 1] == '[') {
+                i += 2;
+                while (i < n && !((in[i] >= 'A' && in[i] <= 'Z') || (in[i] >= 'a' && in[i] <= 'z')))
+                    i++;
+            }
+            continue;
+        }
+        out[k++] = in[i] == '\t' ? ' ' : in[i];
+    }
+    out[k] = '\0';
+    return k;
+}
+
+/* Percentage shown by common tools on a progress line, or -1:
+ * cmake/make "[ 47%]", ninja "[123/456]", curl " 70  542.7k  70 ...". */
+static int line_percent(const char *l, bool downloading)
+{
+    while (*l == ' ')
+        l++;
+    char *e;
+    if (*l == '[') {
+        long a = strtol(l + 1 + strspn(l + 1, " "), &e, 10);
+        if (e[0] == '%' && e[1] == ']' && a >= 0 && a <= 100)
+            return (int)a;
+        if (e[0] == '/') {
+            long b = strtol(e + 1, &e, 10);
+            if (e[0] == ']' && b > 0 && a >= 0 && a <= b)
+                return (int)(a * 100 / b);
+        }
+        return -1;
+    }
+    if (downloading && *l >= '0' && *l <= '9') {
+        long a = strtol(l, &e, 10);
+        if (*e == ' ' && a >= 0 && a <= 100 && strchr(e, ':') != NULL)
+            return (int)a;   /* curl's progress meter (has a time column) */
+    }
+    return -1;
+}
+
+static void progress_line(Node *n, const char *line)
+{
+    const char *m = strstr(line, "==> ");
+    if (m) {
+        m += 4;
+        if (strncmp(m, "ERROR", 5) == 0 || strncmp(m, "WARNING", 7) == 0)
+            return;
+        for (size_t i = 0; i < sizeof stages / sizeof stages[0]; i++)
+            if (strncmp(m, stages[i].key, strlen(stages[i].key)) == 0) {
+                n->stage = stages[i].stage;
+                n->percent = -1;
+                n->detail[0] = '\0';
+                return;
+            }
+        return;
+    }
+    const char *d = strstr(line, "-> Downloading ");
+    if (d) {   /* "  -> Downloading foo-1.0.tar.gz..." */
+        d += 15;
+        size_t len = strcspn(d, " ");
+        while (len && d[len - 1] == '.')
+            len--;
+        StrBuf b;
+        sb_init(&b, 0);
+        sanitize_append(&b, d, len, false);
+        snprintf(n->detail, sizeof n->detail, "%s", b.data);
+        sb_free(&b);
+        n->percent = -1;
+        return;
+    }
+    int pc = line_percent(line, n->stage && strstr(n->stage, "downloading") != NULL);
+    if (pc >= 0)
+        n->percent = pc;
+}
+
+/* Reads what the build wrote since the last tick and updates its stage. */
+static void progress_read(Node *n)
+{
+    int fd = open(n->log, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0)
+        return;
+    if (lseek(fd, n->log_off, SEEK_SET) < 0) {
+        close(fd);
+        return;
+    }
+    char buf[65536];
+    for (int rounds = 0; rounds < 64; rounds++) {   /* at most 4 MiB per tick */
+        ssize_t r = read(fd, buf, sizeof buf);
+        if (r <= 0)
+            break;
+        n->log_off += r;
+        for (ssize_t i = 0; i < r; i++) {
+            char c = buf[i];
+            if (c == '\n' || c == '\r') {   /* curl redraws its meter with \r */
+                char clean[sizeof n->carry];
+                strip_ansi(n->carry, n->ncarry, clean, sizeof clean);
+                if (clean[0])
+                    progress_line(n, clean);
+                n->ncarry = 0;
+            } else if (n->ncarry < sizeof n->carry - 1) {
+                n->carry[n->ncarry++] = c;
+            }
+        }
+    }
+    close(fd);
+    /* an unfinished line can already hold a progress meter */
+    if (n->ncarry) {
+        char clean[sizeof n->carry];
+        strip_ansi(n->carry, n->ncarry, clean, sizeof clean);
+        int pc = line_percent(clean, n->stage && strstr(n->stage, "downloading") != NULL);
+        if (pc >= 0)
+            n->percent = pc;
+    }
+}
+
+/* Appends s to out using at most *room terminal columns (UTF-8 aware). */
+static void append_cols(StrBuf *out, const char *s, size_t *room)
+{
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if ((*p & 0xC0) != 0x80) {   /* start of a character: costs one column */
+            if (*room == 0)
+                break;
+            (*room)--;
+        }
+        sb_putc(out, (char)*p);
+    }
+}
+
+/*
+ * Live progress while builds run in the background. On a terminal a small
+ * block is redrawn every second: a header and one line per build with its
+ * stage in plain words, a percentage when the tools print one, and the
+ * elapsed time. Without a terminal the same lines are printed every minute.
+ */
+typedef struct {
+    bool tty;
+    size_t lines;      /* lines of the block currently on screen */
+    unsigned tick;
+    time_t last_plain;
+} Progress;
+
+static void progress_clear(Progress *g)
+{
+    if (g->lines) {
+        printf("\033[%zuA\r\033[J", g->lines);
+        fflush(stdout);
+        g->lines = 0;
+    }
+}
+
+static void progress_show(Progress *g, Plan *p, size_t done, size_t total)
+{
+    time_t now = time(NULL);
+    for (size_t i = 0; i < p->n; i++)
+        if (p->v[i].running)
+            progress_read(&p->v[i]);
+    if (!g->tty) {
+        if (now - g->last_plain < 60)
+            return;
+        g->last_plain = now;
+    }
+    size_t nrun = 0, waiting = 0, width = 0;
+    for (size_t i = 0; i < p->n; i++) {
+        const Node *n = &p->v[i];
+        if (n->running) {
+            nrun++;
+            if (strlen(n->base) > width)
+                width = strlen(n->base);
+        } else if (n->state == ST_PENDING) {
+            waiting++;
+        }
+    }
+    if (nrun == 0)
+        return;
+    if (width > 32)
+        width = 32;
+
+    StrList out;
+    sl_init(&out);
+    static const char spin[] = "|/-\\";
+    StrBuf l;
+    sb_init(&l, 0);
+    sb_printf(&l, "   %c %zu of %zu finished, %zu building now", g->tty ? spin[g->tick++ % 4] : '*',
+              done, total, nrun);
+    if (waiting)
+        sb_printf(&l, ", %zu waiting to start", waiting);
+    sl_push(&out, l.data);
+    for (size_t i = 0; i < p->n; i++) {
+        const Node *n = &p->v[i];
+        if (!n->running)
+            continue;
+        char el[32];
+        fmt_elapsed(el, sizeof el, now - n->started);
+        sb_reset(&l);
+        sb_printf(&l, "     %-*.*s  %-7s %s", (int)width, (int)width, n->base, el,
+                  n->stage ? n->stage : "starting");
+        if (n->percent >= 0)
+            sb_printf(&l, " %d%%", n->percent);
+        if (n->detail[0] && n->stage && strstr(n->stage, "downloading"))
+            sb_printf(&l, " (%s)", n->detail);
+        sl_push(&out, l.data);
+    }
+    sb_free(&l);
+
+    if (g->tty) {
+        progress_clear(g);
+        size_t cols = tty_columns();
+        for (size_t i = 0; i < out.n; i++) {
+            size_t room = cols > 1 ? cols - 1 : 1;   /* never wrap: keeps the redraw exact */
+            StrBuf cut;
+            sb_init(&cut, 0);
+            append_cols(&cut, out.v[i], &room);
+            printf("%s\n", cut.data);
+            sb_free(&cut);
+        }
+        g->lines = out.n;
+    } else {
+        for (size_t i = 0; i < out.n; i++)
+            printf("%s\n", out.v[i]);
+    }
+    fflush(stdout);
+    sl_free(&out);
+}
+
 /*
  * Up to BuildJobs makepkg processes at once. A package starts only when every
  * plan package it depends on is installed, so the dependency order is kept.
@@ -995,11 +1350,18 @@ static int run_parallel(Plan *p)
     size_t jobs = (size_t)p->o->build_jobs, nrun = 0, done = 0;
     printf("\n%s:: Building %zu AUR packages, up to %zu at a time (dependency order kept)%s\n",
            C_BOLD, total, jobs, C_END);
+    printf("   this can take a while; what each build is doing is shown below\n"
+           "   (complete output in the log files listed)\n");
+    Progress prog;
+    memset(&prog, 0, sizeof prog);
+    prog.tty = isatty(STDOUT_FILENO) != 0;
+    prog.last_plain = time(NULL);
     for (;;) {
         for (size_t i = 0; i < p->n && nrun < jobs; i++) {
             Node *n = &p->v[i];
             if (n->state != ST_PENDING || n->running || !node_ready(p, i))
                 continue;
+            progress_clear(&prog);
             n->pid = spawn_build(p, n);
             if (n->pid < 0) {
                 mark(n, ST_FAILED, "could not start makepkg");
@@ -1008,6 +1370,11 @@ static int run_parallel(Plan *p)
             }
             n->running = true;
             n->started = time(NULL);
+            n->log_off = 0;
+            n->stage = NULL;
+            n->percent = -1;
+            n->detail[0] = '\0';
+            n->ncarry = 0;
             nrun++;
             printf("   %s->%s building %s  (log: %s)\n", C_BLUE, C_END, n->base, n->log);
         }
@@ -1020,8 +1387,13 @@ static int run_parallel(Plan *p)
         for (size_t k = 0; k < p->n; k++)
             if (p->v[k].running)
                 set[ns++] = p->v[k].pid;
-        pid_t w = proc_wait_set(set, ns, &rc);
+        pid_t w = proc_wait_set_timeout(set, ns, &rc, 1000);
         free(set);
+        if (w == 0) {
+            progress_show(&prog, p, done, total);
+            continue;
+        }
+        progress_clear(&prog);
         if (w < 0)
             break;
         size_t i = p->n;
@@ -1098,7 +1470,9 @@ static int run_plan(Plan *p)
         Report rep;
         report_init(&rep);
         audit_repo(n->dir, true, &rep);
-        ReviewCtx ctx = { n->dir, n->base, n->commit, p->o->cache, n->installed };
+        audit_aur_meta(&rep, &n->meta, (long)time(NULL));
+        ReviewCtx ctx = { n->dir, n->base, n->commit, p->o->cache, n->installed,
+                          p->o->full_review, &n->meta };
         Decision d = review_package(&ctx, &rep);
         report_free(&rep);
         if (d == DEC_ABORT)
@@ -1552,6 +1926,9 @@ int cmd_clean(const Options *o, bool all)
     if (o->repo_only)
         return 0;
     printf("\n:: AUR build cache: %s\n", o->cache);
+    char staged[PATH_BUF];
+    if (staging_root(o->cache, staged, sizeof staged))
+        rmtree(staged);
     if (all && !ask_yesno("Remove ALL cloned AUR repositories (and your review history)?",
                           false, o->noconfirm))
         return 1;
@@ -1586,8 +1963,16 @@ int cmd_audit_dir(const char *dir)
     Report rep;
     report_init(&rep);
     audit_repo(real, is_git, &rep);
+    Verdict v = audit_verdict(&rep);
     printf("%s:: Audit of %s%s\n", C_BOLD, real, C_END);
-    report_print(&rep, stdout, use_color());
+    printf("   %s%s%s\n   %s\n\n", v >= VERDICT_DANGER ? C_RED : v == VERDICT_CAUTION ? C_YEL
+                                                                                  : C_GREEN,
+           verdict_title(v), C_END, verdict_advice(v));
+    report_print_plain(&rep, stdout, use_color());
+    if (rep.n) {
+        printf("\n%s:: Technical details%s\n", C_BOLD, C_END);
+        report_print(&rep, stdout, use_color());
+    }
     printf("\nhighest severity: %s (%zu findings)\n", severity_name(rep.max), rep.n);
     printf("This is a reading aid, not a verdict: read PKGBUILD and *.install in full.\n");
     int r = (int)rep.max;

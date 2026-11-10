@@ -25,6 +25,16 @@ void perf_config_defaults(PerfConfig *c)
     c->repo_download = -1;
     c->mirrors = 0;
     c->speedtest = 1;
+    c->review = 0;
+}
+
+int perf_parse_review(const char *s)
+{
+    if (strcmp(s, "simple") == 0)
+        return 0;
+    if (strcmp(s, "full") == 0)
+        return 1;
+    return -1;
 }
 
 int perf_parse_repo_download(const char *s)
@@ -109,6 +119,8 @@ int perf_config_parse(const char *text, const char *origin, PerfConfig *c)
             c->build_jobs = t;
         } else if (strcmp(k, "FetchJobs") == 0 && (t = perf_parse_jobs(v)) >= 0) {
             c->fetch_jobs = t;
+        } else if (strcmp(k, "Review") == 0 && (t = perf_parse_review(v)) >= 0) {
+            c->review = t;
         } else if (strcmp(k, "SpeedTest") == 0 &&
                    (strcmp(v, "never") == 0 || strcmp(v, "auto") == 0 ||
                     strcmp(v, "always") == 0)) {

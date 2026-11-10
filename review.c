@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
 
 static bool reviewed_path(const char *dir, char *buf, size_t sz)
@@ -174,27 +175,33 @@ static void build_full_view(const ReviewCtx *c, StrBuf *view)
 }
 
 Decision ask_decision(const char *pkgbase, const char *what, Severity max,
-                      bool installed, bool can_view)
+                      bool installed, const char *view_label)
 {
     if (!stdin_is_tty()) {
         fprintf(stderr, "error: a decision about %s requires an interactive terminal; aborting\n",
                 pkgbase);
         return DEC_ABORT;
     }
+    Report tmp;
+    report_init(&tmp);
+    tmp.max = max;
+    Verdict v = audit_verdict(&tmp);
     for (;;) {
-        printf("\n%s:: %s%s %s — highest severity: %s%s%s\n", C_BOLD, pkgbase, C_END, what,
+        printf("\n%s:: %s%s %s\n", C_BOLD, pkgbase, C_END, what);
+        printf("   safety check: %s%s%s (%s)\n",
                max >= SEV_HIGH ? C_RED : (max == SEV_WARN ? C_YEL : C_GREEN),
-               severity_name(max), C_END);
-        printf("   [a] approve\n");
-        printf("   [s] skip %s and continue with the other packages%s\n", pkgbase,
-               installed ? " (installed version is kept)" : "");
+               verdict_title(v), C_END, severity_name(max));
+        printf("   [a] approve%s\n", max >= SEV_HIGH ? "" : "  (build and install it)");
+        printf("   [s] skip %s and continue with the other packages%s%s\n", pkgbase,
+               installed ? " (installed version is kept)" : "",
+               max >= SEV_HIGH ? "  <- recommended" : "");
         if (installed)
             printf("   [r] remove %s from the system and continue with the others\n", pkgbase);
-        if (can_view)
-            printf("   [v] show the review again\n");
+        if (view_label)
+            printf("   [v] %s\n", view_label);
         printf("   [x] abort everything\n");
         discard_typeahead();
-        char buf[64];
+        char buf[MAX_NAME_LEN + 2];
         do {   /* bare ENTER just asks again */
             printf("%schoice:%s ", C_BLUE, C_END);
             if (!read_line(buf, sizeof buf))
@@ -208,10 +215,19 @@ Decision ask_decision(const char *pkgbase, const char *what, Severity max,
         case 'a': case 'A':
             if (max < SEV_HIGH)
                 return DEC_APPROVE;
-            printf("%s   %s has %s findings. Type the word yes to confirm approval "
-                   "(anything else goes back):%s ", C_RED, pkgbase, severity_name(max), C_END);
-            if (read_line(buf, sizeof buf) && strcmp(buf, "yes") == 0)
-                return DEC_APPROVE;
+            if (max >= SEV_CRIT) {
+                printf("%s   %s has CRITICAL findings. To install it anyway, type the package "
+                       "name (%s);\n   anything else goes back:%s ", C_RED, pkgbase, pkgbase, C_END);
+                discard_typeahead();
+                if (read_line(buf, sizeof buf) && strcmp(buf, pkgbase) == 0)
+                    return DEC_APPROVE;
+            } else {
+                printf("%s   %s has %s findings. Type the word yes to confirm approval "
+                       "(anything else goes back):%s ", C_RED, pkgbase, severity_name(max), C_END);
+                discard_typeahead();
+                if (read_line(buf, sizeof buf) && strcmp(buf, "yes") == 0)
+                    return DEC_APPROVE;
+            }
             printf("   approval not confirmed\n");
             continue;
         case 's': case 'S':
@@ -221,7 +237,7 @@ Decision ask_decision(const char *pkgbase, const char *what, Severity max,
                 return DEC_REMOVE;
             break;
         case 'v': case 'V':
-            if (can_view)
+            if (view_label)
                 return DEC_VIEW;
             break;
         case 'x': case 'X':
@@ -245,6 +261,109 @@ static const char *decision_name(Decision d)
     return "?";
 }
 
+static void fmt_date(char *buf, size_t sz, long t)
+{
+    time_t tt = (time_t)t;
+    struct tm tm;
+    if (t <= 0 || gmtime_r(&tt, &tm) == NULL || strftime(buf, sz, "%Y-%m-%d", &tm) == 0)
+        snprintf(buf, sz, "unknown");
+}
+
+static void print_about(const AurMeta *m)
+{
+    if (m == NULL || !m->known)
+        return;
+    char first[32], last[32];
+    fmt_date(first, sizeof first, m->first_submitted);
+    fmt_date(last, sizeof last, m->last_modified);
+    printf("   About it (AUR): %ld vote%s, popularity %.2f, first published %s, "
+           "last updated %s%s%s\n",
+           m->votes, m->votes == 1 ? "" : "s", m->popularity, first, last,
+           m->orphan ? ", NO MAINTAINER" : "", m->outofdate ? ", flagged out of date" : "");
+}
+
+/* How the downloads are verified, in plain words. */
+static void print_sources(const char *dir)
+{
+    char path[PATH_BUF];
+    StrBuf b;
+    sb_init(&b, MAX_SCAN_FILE_BYTES);
+    if (!path_join(path, sizeof path, dir, ".SRCINFO") ||
+        read_file_limited(path, MAX_SCAN_FILE_BYTES, &b) != 0) {
+        sb_free(&b);
+        return;
+    }
+    SourceStats st;
+    audit_source_stats(b.data, &st);
+    sb_free(&b);
+    if (st.remote == 0 && st.vcs == 0) {
+        printf("   Downloads: none (everything is in the reviewed repository)\n");
+        return;
+    }
+    if (st.remote) {
+        if (st.strong == st.remote)
+            printf("   Downloads: %s%zu file%s, all checked against a SHA-256 (or stronger) "
+                   "fingerprint%s\n", C_GREEN, st.remote, st.remote == 1 ? "" : "s", C_END);
+        else
+            printf("   Downloads: %zu file%s: %zu with a strong fingerprint, %s%zu weak, "
+                   "%zu NOT checked%s\n", st.remote, st.remote == 1 ? "" : "s", st.strong,
+                   st.unchecked ? C_YEL : "", st.weak, st.unchecked, st.unchecked ? C_END : "");
+        if (st.signatures)
+            printf("              plus %zu signature file%s checked by makepkg\n",
+                   st.signatures, st.signatures == 1 ? "" : "s");
+    }
+    if (st.vcs) {
+        if (st.vcs_pinned == st.vcs)
+            printf("   Code from %zu developer repositor%s, pinned to an exact version\n",
+                   st.vcs, st.vcs == 1 ? "y" : "ies");
+        else
+            printf("   Code from %zu developer repositor%s: %s%zu always take%s the newest, "
+                   "unreviewed code%s\n", st.vcs, st.vcs == 1 ? "y" : "ies", C_YEL,
+                   st.vcs - st.vcs_pinned, st.vcs - st.vcs_pinned == 1 ? "s" : "", C_END);
+    }
+}
+
+/* "N files changed, +A -B lines" of a unified diff. */
+static void diff_stats(const char *d, size_t len, size_t *files, size_t *add, size_t *del)
+{
+    *files = *add = *del = 0;
+    const char *p = d, *end = d + len;
+    while (p < end) {
+        const char *e = memchr(p, '\n', (size_t)(end - p));
+        size_t n = e ? (size_t)(e - p) : (size_t)(end - p);
+        if (n >= 11 && strncmp(p, "diff --git ", 11) == 0)
+            (*files)++;
+        else if (n >= 1 && p[0] == '+' && !(n >= 3 && strncmp(p, "+++", 3) == 0))
+            (*add)++;
+        else if (n >= 1 && p[0] == '-' && !(n >= 3 && strncmp(p, "---", 3) == 0))
+            (*del)++;
+        if (!e)
+            break;
+        p = e + 1;
+    }
+}
+
+static void print_safety_summary(const ReviewCtx *c, const Report *rep, bool update,
+                          size_t files, size_t add, size_t del)
+{
+    Verdict v = audit_verdict(rep);
+    const char *col = v >= VERDICT_DANGER ? C_RED : v == VERDICT_CAUTION ? C_YEL : C_GREEN;
+    printf("\n%s:: Safety check of %s @ %.12s%s\n", C_BOLD, c->pkgbase, c->commit, C_END);
+    printf("   %s%s%s\n   %s\n\n", col, verdict_title(v), C_END, verdict_advice(v));
+    print_about(c->meta);
+    print_sources(c->dir);
+    if (update)
+        printf("   Update: %zu file%s changed (+%zu / -%zu lines) since the version you "
+               "approved before\n", files, files == 1 ? "" : "s", add, del);
+    else
+        printf("   First install: the whole package is new to you\n");
+    printf("\n   What the automatic check found (! serious, * check, - note):\n");
+    report_print_plain(rep, stdout, use_color());
+    printf("\n   PKGBUILD runs as you while building; an install script runs as administrator.\n"
+           "   Reading the code is optional: you can decide from this summary, or choose\n"
+           "   [v] to read the PKGBUILD yourself before deciding.\n");
+}
+
 Decision review_package(const ReviewCtx *c, const Report *rep)
 {
     char prev[80];
@@ -260,7 +379,11 @@ Decision review_package(const ReviewCtx *c, const Report *rep)
     sb_init(&view, 0);
     StrBuf diff;
     sb_init(&diff, MAX_GIT_OUTPUT);
+    bool update = false;
+    size_t files = 0, add = 0, del = 0;
     if (have_prev && strcmp(prev, c->commit) != 0 && git_diff(c->dir, prev, c->commit, &diff) == 0) {
+        update = true;
+        diff_stats(diff.data, diff.len, &files, &add, &del);
         sb_printf(&view, "==== %s: changes since your last approved review ====\n"
                          "==== %.12s -> %.12s ====\n\n", c->pkgbase, prev, c->commit);
         sanitize_append(&view, diff.data, diff.len, true);
@@ -269,33 +392,42 @@ Decision review_package(const ReviewCtx *c, const Report *rep)
     }
     sb_free(&diff);
 
-    printf("\n%s:: Security audit of %s @ %.12s%s\n", C_BOLD, c->pkgbase, c->commit, C_END);
-    report_print(rep, stdout, use_color());
+    print_safety_summary(c, rep, update, files, add, del);
 
-    printf("\n%s::%s Opening review of %s (q to leave the pager)...\n", C_BLUE, C_END, c->pkgbase);
-    if (stdin_is_tty() && isatty(STDOUT_FILENO)) {
-        printf("   press ENTER to continue ");
-        char tmp[8];
-        read_line(tmp, sizeof tmp);
+    bool show = c->full;
+    if (show) {
+        printf("\n%s::%s Opening the code of %s (q to leave the pager)...\n", C_BLUE, C_END,
+               c->pkgbase);
+        if (stdin_is_tty() && isatty(STDOUT_FILENO)) {
+            printf("   press ENTER to continue ");
+            char tmp[8];
+            read_line(tmp, sizeof tmp);
+        }
     }
 
     Decision d;
     for (;;) {
-        show_paged(c->cache, view.data, view.len);
-        if (rep->n) {
-            printf("\n%s:: Audit findings for %s%s\n", C_BOLD, c->pkgbase, C_END);
-            report_print(rep, stdout, use_color());
+        if (show) {
+            show_paged(c->cache, view.data, view.len);
+            if (rep->n) {
+                printf("\n%s:: Technical audit findings for %s%s\n", C_BOLD, c->pkgbase, C_END);
+                report_print(rep, stdout, use_color());
+            }
         }
         char what[128];
-        snprintf(what, sizeof what, "@ %.12s: build this commit?", c->commit);
-        d = ask_decision(c->pkgbase, what, rep->max, c->installed, true);
+        snprintf(what, sizeof what, "@ %.12s: build and install this version?", c->commit);
+        d = ask_decision(c->pkgbase, what, rep->max, c->installed,
+                         update ? "review what changed in the build files (optional)"
+                                : "review the build files: PKGBUILD and scripts (optional)");
         if (d != DEC_VIEW)
             break;
+        show = true;
     }
     sb_free(&view);
 
-    syslog(LOG_AUTHPRIV | LOG_NOTICE, "review %s pkgbase=%s commit=%s max_severity=%s findings=%zu",
-           decision_name(d), c->pkgbase, c->commit, severity_name(rep->max), rep->n);
+    syslog(LOG_AUTHPRIV | LOG_NOTICE, "review %s pkgbase=%s commit=%s max_severity=%s findings=%zu "
+           "mode=%s", decision_name(d), c->pkgbase, c->commit, severity_name(rep->max), rep->n,
+           c->full ? "full" : "simple");
     if (d == DEC_APPROVE && review_record(c->dir, c->commit) != 0)
         fprintf(stderr, "warning: could not record review state\n");
     return d;

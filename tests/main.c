@@ -9,6 +9,8 @@ void run_vercmp_tests(void);
 void run_srcinfo_tests(void);
 void run_audit_tests(void);
 void run_audit_calibration_tests(void);
+void run_audit_plain_tests(void);
+void run_sha256_tests(void);
 void run_tty_tests(void);
 void run_cli_parse_tests(void);
 void run_perf_tests(void);
@@ -25,6 +27,8 @@ int main(void)
     run_srcinfo_tests();
     run_audit_tests();
     run_audit_calibration_tests();
+    run_audit_plain_tests();
+    run_sha256_tests();
     run_tty_tests();
     run_cli_parse_tests();
     run_perf_tests();

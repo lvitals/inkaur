@@ -13,10 +13,14 @@ The AUR is open to everyone, so a package build script can do anything on
 your machine. inkaur is built around one rule: **nothing from the AUR is
 built until a human has reviewed the exact commit that will be built.** Every
 AUR package, including every AUR dependency, is checked out at a fixed git
-commit and run through a static security audit. The full source is shown for
-review before anything is compiled. On updates, only what changed since your
-last approval is shown. After the build, the package contents are audited
-again before installation, and every decision is logged.
+commit and run through a static security audit. You get a **plain-language
+safety summary** (a verdict, what each warning means, how every download is
+verified, and how established the package is in the AUR), so you do not need
+to read shell scripts to make a good decision; the full source is one key
+away. On updates, only what changed since your last approval is shown. After
+the build, the package is copied to a private directory, its SHA-256 is
+recorded, its contents and real install script are audited, and it is
+installed only if the hash still matches. Every decision is logged.
 
 It also aims to be a drop-in replacement for pacman. It accepts the same
 operations and options, handles the AUR side itself, and passes everything
@@ -77,7 +81,8 @@ inkaur -Si pkg...        # info from the repositories or the AUR
 inkaur -Qu               # pending updates, repositories and AUR
 inkaur -Q --aur          # foreign packages (same as -Qm; --repo = -Qn)
 inkaur -Sc / -Scc        # pacman cache cleanup + AUR build files / all clones
-inkaur -A <dir>          # static audit of a local PKGBUILD dir (exit 0..3 = severity)
+inkaur -A <dir>          # audit of a local PKGBUILD dir, explained (exit 0..3 = severity)
+inkaur -S --review=full pkg     # open the code in the pager right away
 inkaur -Qi / -Ql / -Qo / -R / -U / -D / -F / -T ...   # passed to pacman as is
 ```
 
@@ -129,6 +134,18 @@ order still holds:
   installed. Repository dependencies of the builds are installed first in one
   `pacman -S --asdeps --needed`. Builds run without a terminal and write to
   `~/.cache/inkaur/.logs/<pkgbase>.log` (the last lines are shown on failure).
+  While they run, a small block is refreshed every second with one line per
+  build: what it is doing in plain words (downloading the source code,
+  checking download fingerprints, compiling, running tests, packaging...),
+  a percentage when the build tools print one, and the elapsed time:
+
+  ```
+     / 0 of 3 finished, 2 building now, 1 waiting to start
+       libarchive-static  1m20s   downloading the source code 70% (libarchive-3.8.1.tar.xz)
+       openmsx            1m20s   compiling 47%
+  ```
+
+  Without a terminal, the same lines are printed once a minute.
   Everything interactive stays one at a time: reviews, PGP key confirmation,
   HIGH-finding decisions and `pacman -U`. `--chroot` builds always run one at
   a time.
@@ -168,6 +185,7 @@ FetchJobs = auto     # auto | 1..64
 RepoDownload = auto  # auto | pacman (pacman -Suw) | mirrors (inkaur) | no
 Mirrors   = auto     # mirrors per repository for RepoDownload = mirrors (1..8)
 SpeedTest = auto     # auto (use the saved result) | always (measure before -Su) | never
+Review    = simple   # simple (safety summary, code with [v]) | full (code opens right away)
 ```
 
 ### Repository downloads and mirrors
@@ -199,14 +217,64 @@ shell.
 
 ## Security model
 
+### Easy to use: the safety summary
+
+You do not need to read a PKGBUILD to use inkaur safely. Before anything is
+built, each package gets a summary like this:
+
+```
+:: Safety check of foo-bin @ 3f2a9c1e0b7d
+   Serious warning signs
+   Do not install unless you know why the package needs this. If unsure,
+   choose [s] skip and ask in the package's AUR comments or the forums.
+
+   About it (AUR): 0 votes, popularity 0.00, first published 2026-11-08, last updated 2026-11-08
+   Downloads: 1 file: 0 with a strong fingerprint, 0 weak, 1 NOT checked
+   First install: the whole package is new to you
+
+   What the automatic check found (! serious, * check, - note):
+   !  a download has no fingerprint (SKIP), so it could be replaced on the server unnoticed
+        (.SRCINFO)
+   *  this package is very new and nobody has voted for it yet; recent AUR malware looked exactly like this
+        (AUR)
+   -  installs a ready-made program instead of building it; you trust whoever made that file
+        (.SRCINFO)
+
+:: foo-bin @ 3f2a9c1e0b7d: build and install this version?
+   safety check: Serious warning signs (HIGH)
+   [a] approve
+   [s] skip foo-bin and continue with the other packages  <- recommended
+   [v] review the build files: PKGBUILD and scripts (optional)
+   [x] abort everything
+```
+
+* **Verdict.** *No warning signs found*, *Some things need your attention*,
+  *Serious warning signs* or *DANGER: looks malicious or broken*, with advice
+  in plain words and the recommended choice marked.
+* **Every warning explained.** Each finding says what it means for you
+  ("downloads a program from the internet and runs it at once"), grouped so
+  the same warning is not repeated, with the file and line.
+* **Trust signals from the AUR.** Votes, popularity, age, maintainer and
+  out-of-date flag. A brand-new package with no votes is a warning: recent AUR
+  malware campaigns used exactly such packages.
+* **How downloads are verified.** How many files have a SHA-256 (or stronger)
+  fingerprint, how many only a weak one, and how many are not checked at all.
+* **Hard stops.** Approving HIGH findings needs the word `yes`; CRITICAL
+  findings need the package name typed out.
+
+`[v]` opens the full code (or, on updates, exactly what changed) in the
+secure pager. To always open the code first, as before, set `Review = full`
+in `inkaur.conf` or pass `--review=full`.
+
 ### What happens on `-S`
 
 1. **Resolve.** AUR dependencies are read from each repo's `.SRCINFO` at the
    fetched commit. They are parsed as data, never executed.
 2. **Review everything first.** Each package is checked out at an exact commit
-   (`git reset --hard` + `git clean -ffdx`) and audited. The whole repository
-   is shown in a pager. On updates, only the diff since your last approved
-   commit is shown. If any package is rejected, nothing is built.
+   (`git reset --hard` + `git clean -ffdx`) and audited, and the safety
+   summary is shown. The whole repository (on updates, only the diff since
+   your last approved commit) is shown in a pager with `[v]`, or right away
+   with `Review = full`.
 3. **Decide, per package.** Every package gets an explicit menu with no
    default answer:
    ```
@@ -216,8 +284,8 @@ shell.
    [v] show the review again
    [x] abort everything
    ```
-   Approving a package with HIGH/CRITICAL findings also requires typing the
-   fixed word `yes`. Skipping or removing a package also skips the packages in
+   Approving a package with HIGH findings also requires typing the
+   fixed word `yes`; CRITICAL findings require typing the package name. Skipping or removing a package also skips the packages in
    the plan that need it, unless an installed older version still satisfies
    them. A failed build or a rejected built package works the same way. The
    run ends with a summary of what was installed, skipped, removed or failed.
@@ -227,12 +295,23 @@ shell.
    commit. PGP keys from `validpgpkeys` are never imported silently: each full
    fingerprint is shown, and you confirm it separately. Short key IDs are
    rejected. The `.SRCINFO` is compared with `makepkg --printsrcinfo`.
-5. **Audit the built package** before `pacman -U`. HIGH findings bring up the same menu. It checks for setuid/setgid
-   and world-writable files, `..` paths, files under `/home`, `/root`,
-   `sudoers`, `ld.so.preload`, PAM, `profile.d`, pacman hooks, pre-enabled
-   systemd units, cron, kernel modules, and `.INSTALL` scriptlets.
-6. Every approval, rejection, key import and installation goes to syslog
-   (`journalctl -t inkaur`).
+5. **Pin the built package by hash.** Each built file is copied (never
+   through a symlink, never over an existing file) into a private
+   `~/.cache/inkaur/.staged/<pkgbase>/` while its SHA-256 is computed. The
+   copy is what is audited and installed, and the hash is shown and logged.
+6. **Audit the built package** before `pacman -U`. HIGH findings bring up the
+   same menu. It checks for setuid/setgid and world-writable files, `..`
+   paths, files under `/home`, `/root`, `sudoers`, `ld.so.preload`, PAM,
+   `profile.d`, pacman hooks, pre-enabled systemd units, cron and kernel
+   modules. The real `.INSTALL` inside the package (which runs as root) is
+   scanned with the same rules as the PKGBUILD, and `.PKGINFO` must name the
+   expected package and pkgbase: a package file that would install itself as
+   another package (say `sudo`) is CRITICAL.
+7. **Verify the hash before installing.** Right before `pacman -U`, every
+   staged file is hashed again. If anything changed since it was audited,
+   nothing is installed and the mismatch is logged.
+8. Every approval, rejection, key import, package hash and installation goes
+   to syslog (`journalctl -t inkaur`).
 
 The approved commit is stored in `.git/inkaur-reviewed`. That file sits
 outside the worktree, so repository content cannot forge it.
@@ -257,8 +336,20 @@ outside the worktree, so repository content cannot forge it.
   sources without `validpgpkeys`, invalid names and dependency strings, and
   `install=` scriptlets.
 
-The audit is a reading aid with hard stops, not a verdict. Read `PKGBUILD` and
-`*.install` in full.
+* AUR metadata: brand-new packages with no votes, orphaned and out-of-date
+  packages.
+* Built package: file listing, the real `.INSTALL`, and `.PKGINFO` identity.
+
+Every finding has a plain-language explanation, and the report becomes one
+of four verdicts. The audit is a strong helper with hard stops, not a
+guarantee: it cannot prove that a package is safe. When in doubt, skip the
+package and ask in its AUR comments, or prefer well-established packages.
+
+Limits of the hash pin: it guarantees that what is installed is byte for
+byte what was audited, even if the build directory is changed afterwards. A
+build already runs as your user, so it cannot protect against a malicious
+PKGBUILD you approved; use `--chroot` to build in a clean, isolated
+environment.
 
 ### Process and input hardening
 

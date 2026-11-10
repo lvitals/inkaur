@@ -69,6 +69,15 @@ static int rpc_call(const char *url, RpcResult *out)
             a->outofdate = (long)ood;
         const JVal *m = json_get(p, "Maintainer");
         a->orphan = (m == NULL || m->t == J_NULL);
+        double num = 0;
+        if (json_get_num(p, "NumVotes", &num) && num >= 0 && num < 1e9)
+            a->votes = (long)num;
+        if (json_get_num(p, "Popularity", &num) && num >= 0 && num < 1e9)
+            a->popularity = num;
+        if (json_get_num(p, "FirstSubmitted", &num) && num > 0 && num < 1e11)
+            a->first_submitted = (long)num;
+        if (json_get_num(p, "LastModified", &num) && num > 0 && num < 1e11)
+            a->last_modified = (long)num;
         a->raw = p;
     }
     return 0;

